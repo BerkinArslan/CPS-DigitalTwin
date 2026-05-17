@@ -156,17 +156,30 @@ class IrrigationSystem:
         self.get_node(start_node).outgoing_links.append(pipe)
         self.get_node(end_node).incoming_links.append(pipe)
 
-    def visualize_standard(self, size:float = 1):
+    def visualize_standard(self, size:float = 1, show_states:bool = True):
         """
         Visualizes the system in  simple plot
         :return:
         """
         fig, ax = plt.subplots()
+
+        x_min, x_max = float('inf'), float('-inf')
+        y_min, y_max = float('inf'), float('-inf')
+
+        #add all of the nodes to the plot
         for node_name, node in self.nodes.items():
+            x = node.coordinates[0]
+            y = node.coordinates[1]
+
+            x_min = min(x_min, x)
+            x_max = max(x_max, x)
+            y_min = min(y_min, y)
+            y_max = max(y_max, y)
+
+            #plot water tanks as blue box
             if isinstance(node, WaterTank):
                 #plt.scatter(node.coordinates[0], node.coordinates[1], c='b')
-                x = node.coordinates[0]
-                y = node.coordinates[1]
+
                 w, h = 1 * size, 1 * size
                 tank = Rectangle(
                     (x - w/2, y - h/2),
@@ -176,8 +189,13 @@ class IrrigationSystem:
                     linewidth = 1*size,
                 )
                 ax.add_patch(tank)
+                if show_states:
+                    ax.text(x - 3 * size, y,
+                        f'{node_name}\nVolume: {(node.volume/node.max_volume) * 100:.0f}%',
+                        fontsize=3*size, bbox=dict(facecolor='white', edgecolor='black'))
+
+            #plot pots looking like a pot in a plant
             elif isinstance(node, Pot):
-                x, y = node.coordinates
                 top_w = 1.0 * size
                 bottom_w = 0.6 * size
                 h = 1.0 * size
@@ -203,16 +221,26 @@ class IrrigationSystem:
                 )
                 ax.add_patch(plant_shape)
                 ax.add_patch(pot_shape)
+                ax.text(x - 0.3*size, y - 0.1*size, f'{100 * (node.moisture - node.min_moisture) /\
+                    (node.max_moisture + node.min_moisture):.0f}%',
+                        fontsize=3*size, color='white')
             else:
-                x, y = node.coordinates
                 ax.scatter(x, y, c='black')
+
+        #Now pot all of the links in the plot
         for link_name, link in self.links.items():
             starting_coordinates = self.get_node(link.start_node).coordinates
             ending_coordinates = self.get_node(link.end_node).coordinates
             X = [starting_coordinates[0], ending_coordinates[0]]
             Y = [starting_coordinates[1], ending_coordinates[1]]
-            ax.plot(X, Y, label = link_name, linewidth = 1*size, c='gray')
+            ax.plot(X, Y, label = link_name, linewidth = 0.5*size, c='gray', zorder = 0)
 
+
+        ax.set_aspect('equal')
+        ax.set_axis_off()
+        padding = 1.5 * size
+        ax.set_xlim(x_min - padding, x_max + padding)
+        ax.set_ylim(y_min - padding, y_max + padding)
         plt.show()
 
 
@@ -267,9 +295,9 @@ if __name__ == '__main__':
         coordinates = (10, 20),
         elevation = 10,
         soil_volume = 10,
-        max_moisture = 10,
-        min_moisture = 10,
-        initial_moisture = 10,
+        max_moisture = 100,
+        min_moisture = 0,
+        initial_moisture = 54,
     )
 
     sys.add_pipe(
@@ -301,9 +329,9 @@ if __name__ == '__main__':
         coordinates = (30, 20),
         elevation = 10,
         soil_volume = 10,
-        max_moisture = 10,
-        min_moisture = 10,
-        initial_moisture = 10,
+        max_moisture = 100,
+        min_moisture = 0,
+        initial_moisture = 74,
     )
 
     sys.add_pipe(
@@ -335,9 +363,9 @@ if __name__ == '__main__':
         coordinates=(30, 10),
         elevation=10,
         soil_volume=10,
-        max_moisture=10,
-        min_moisture=10,
-        initial_moisture=10,
+        max_moisture=100,
+        min_moisture=0,
+        initial_moisture=38,
     )
 
     sys.add_pipe(
@@ -354,9 +382,9 @@ if __name__ == '__main__':
         coordinates=(20, 5),
         elevation=10,
         soil_volume=10,
-        max_moisture=10,
-        min_moisture=10,
-        initial_moisture=10,
+        max_moisture=100,
+        min_moisture=0,
+        initial_moisture=67,
     )
 
     sys.add_pipe(
