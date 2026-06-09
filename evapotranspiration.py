@@ -126,10 +126,10 @@ if __name__ == "__main__":
 
 
     irradiation_work = net_irradiation_berlin * 24 * 3600 / 1e6 #W/m^2 * s/day = J/m^2*day
-    irradiation_work = irradiation_work / 2.45
+    irradiation_work = irradiation_work
 
-    plant_canopy_energy_absorption = irradiation_work * 0.3
-    soil_energy_absorption = irradiation_work * 0.7
+    plant_canopy_energy_absorption = irradiation_work * 0.3 * 0.45 # 45% evopration efficiency of canopy
+    soil_energy_absorption = irradiation_work * 0.7 * 0.8 #20% albedo
 
     ref_ET = reference_evapotranspiration(t_celcius,
                                      wind_speed,
