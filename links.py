@@ -65,7 +65,9 @@ class Pump(Link):
                  length: float,
                  diameter: float,
                  roughness: float,
-                 power: float,):
+                 power: float,
+                 flow_rate: float,
+                 activation_time: float|list,):
         """
         Creates a new pump with parameters
         :param name: Name of the pump.
@@ -79,9 +81,28 @@ class Pump(Link):
         self.diameter = diameter
         self.roughness = roughness
         self.power = power
+        self.flow_rate = flow_rate
+        self.activation_time = activation_time
 
         # TODO: add waterflow to the links from edges adjacent to
         #  To do put the added flow we need to know the actuator data that we are gonna get
         #Dynamic simulation states
         self.water_flow = None
         self.added_flow = None
+
+    def pump_it(self, schedule):
+        """
+        calculates the pump flow
+        :return: flow rate of the pump
+        """
+        if not isinstance(self.activation_time, list):
+            self.activation_time = [self.activation_time]
+
+        len_simulation = len(self.activation_time)
+        i  = schedule % len_simulation
+        activation = self.activation_time[i]
+        
+        flow_volume = activation * self.flow_rate
+        return flow_volume
+
+

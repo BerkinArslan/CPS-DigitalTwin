@@ -5,11 +5,13 @@ IrrigationSystem is the sup-class that includes edges and links
 This will also include global settings for simulation and simulation method
 
 """
+import utils
 from links import Pump, Pipe
 from nodes import WaterTank, Pot, Node
 from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle, Polygon
 from matplotlib.collections import PatchCollection
+import numpy as np
 
 
 class IrrigationSystem:
@@ -106,7 +108,9 @@ class IrrigationSystem:
                  length: float,
                  diameter: float,
                  roughness: float,
-                 power: float,):
+                 power: float,
+                 flow_rate: float,
+                 activation_time: float | list):
         """
         Adds a Pump object to links in self.links.
         :param name: Name of the Pump object that is to be added.
@@ -116,6 +120,8 @@ class IrrigationSystem:
         :param diameter: Diameter of the link.
         :param roughness: Roughness of the link.
         :param power: TBD
+        :param flow_rate: TBD
+        :param activation_time: TBD
         :return:
         """
         pump = Pump(name = name,
@@ -124,7 +130,9 @@ class IrrigationSystem:
                     length = length,
                     diameter = diameter,
                     roughness = roughness,
-                    power = power,)
+                    power = power,
+                    flow_rate = flow_rate,
+                    activation_time = activation_time)
         self.links[name] = pump
         self.get_node(start_node).outgoing_links.append(pump)
         self.get_node(end_node).incoming_links.append(pump)
@@ -243,6 +251,161 @@ class IrrigationSystem:
         ax.set_ylim(y_min - padding, y_max + padding)
         plt.show()
 
+    # def simulation_step(self, dt):
+    #     """
+    #     runs the simulation for one step with given dt
+    #     :param dt: time difference to simualte
+    #     :return: updates the states of the links and nodes
+    #     """
+    #
+    #     for link in self.links.values():
+    #         if isinstance(link, Pump):
+    #             flow_volume = link.pump_it(0)
+    #             link.start_node.volume = link.start_node.volume - flow_volume
+    #             link.end_node.volume = link.end_node.volume + flow_volume
+
+
+    def _node_inflows(self, pipe_volumes, node_names):
+        """
+        adds inflow of the pipe to end nodes and substract it from the outflows
+        :param pipe_volumes: volume of flow for every pipe
+        :param node_names: names nodes for which inflow is calculated
+        :return:
+        """
+        inflows = {node_name: 0.0 for node_name in node_names}
+
+        for pipe_name, volume in pipe_volumes.items():
+            pipe = self.links[pipe_name]
+
+            if pipe.end_node in inflows:
+                inflows[pipe.end_node] += volume
+
+            if pipe.start_node in inflows:
+                inflows[pipe.start_node] -= volume
+
+        return inflows
+    #TODO:
+    # this is redundant. delete this later and use negative inflow for outflow
+    def _node_outflows(self, pipe_volumes, node_names):
+        """
+        adds inflow of the pipe to start nodes and substract it from the end_nodes
+        :param pipe_volumes: flow for every pipe
+        :param node_names: nodes for which outflow is calculated
+        :return:
+        """
+        inflows = self._node_inflows(pipe_volumes, node_names)
+
+        return {
+            node_name: -volume
+            for node_name, volume in inflows.items()
+        }
+
+    def _solve_resistance_network(self, tanks, pots, volume):
+        """
+        calculates the pipe flow volumes for a fixed total volume.
+
+        to set the flow direction and have distance metric
+        we are going to relative head difference.
+        pot head = 0
+        tank head = 1
+
+        A is the conductance of every node inbetween them
+        b is the conductance of the boundary nodes
+        x is the relative head of each node
+
+        this clacualtes the loss of energy in the pipes
+        for normalized energy "head"
+
+        in this function a constand head/energy assumed
+        for systems wiht big elevation difference this function
+        may not give good results
+
+        :param tanks: sources of water
+        :param pots: sinks of the graph
+        :param volume:
+        :return:
+        """
+
+        if volume <= 0:
+            return {}, {}, {}
+
+        tanks = list(tanks)
+        pots = list(pots)
+
+        boundary_head = {}
+
+        for node_name in tanks:
+            boundary_head[node_name] = 1
+
+        for node_name in pots:
+            boundary_head[node_name] = 0
+
+        graph = utils.create_pipe_adjacency_dict(self.nodes, self.links)
+
+        relevant_nodes = utils.relevant_nodes(graph, self.nodes, self.links)
+
+        unknown_nodes = [
+            node_name for node_name in relevant_nodes if node_name not in boundary_head
+        ]
+
+        node_index = {
+            node_name: i for i, node_name in enumerate(unknown_nodes)
+        }
+
+        heads = dict(boundary_head) #creates a copy
+
+        if unknown_nodes:
+            A = np.zeros((len(unknown_nodes), len(unknown_nodes)))
+            b = np.zeros(len(unknown_nodes))
+
+            for node_name in unknown_nodes:
+                i = node_index[node_name]
+
+                for neighbor, _, conductance in graph[node_name]:
+                    if neighbor not in relevant_nodes:
+                        continue
+
+                    A[i, i] = A[i, i] + conductance
+                    if neighbor in boundary_head:
+                        b[i] = b[i] + conductance * boundary_head[neighbor]
+                    else:
+                        j = node_index[neighbor]
+                        A[i, j] = A[i, j] - conductance
+
+            x = np.linalg.solve(A, b)
+
+            for node_name, head in zip(unknown_nodes, x):
+                heads[node_name] = head
+
+        unit_pipe_volumes = {}
+
+        pipes = {name: link for name, link in self.links.items() if link is not Pump}
+
+        for pipe_name, pipe in pipes:
+            if pipe.start_node not in relevant_nodes:
+                continue
+
+            if pipe.end_node not in relevant_nodes:
+                continue
+            #Q = C * delta_h for normed h
+            conductance = utils.pipe_conductance(pipe)
+            unit_pipe_volumes[pipe_name] = conductance * (heads[pipe.start_node] - heads[pipe.end_node])
+
+            unit_source_out = self._node_inflows(unit_pipe_volumes, tanks)
+            total_unit_source_out = sum(unit_source_out.values()) * -1
+
+            scale = volume / total_unit_source_out
+
+            pipe_volumes = {
+                pipe_name: scale * unit_volume
+                for pipe_name, unit_volume in unit_pipe_volumes.items()
+            }
+
+            tank_outflows = self._node_inflows(pipe_volumes, tanks) * -1
+            pot_inflows = self._node_inflows(pipe_volumes, pots) * -1
+
+            return pipe_volumes, tank_outflows, pot_inflows
+        ######
 
 
 if __name__ == '__main__':
@@ -272,7 +435,9 @@ if __name__ == '__main__':
         length = 20,
         diameter = 10,
         roughness = None,
-        power=None
+        power=None,
+        flow_rate = 0.005,
+        activation_time=5,
     )
 
     sys.add_node(
@@ -397,4 +562,66 @@ if __name__ == '__main__':
     )
 
     sys.visualize_standard(size=3)
+
+    print("\n--- Simulation test ---")
+
+    tank_volume_before = sys.nodes['Tank1'].volume
+
+    pipe_volumes = sys.simulation_step(dt=60, schedule=0)
+
+    tank_volume_after = sys.nodes['Tank1'].volume
+
+    print("\nPipe volumes:")
+    for pipe_name, volume in pipe_volumes.items():
+        print(f"{pipe_name}: {volume:.8f}")
+
+    print("\nPump:")
+    print(f"Pipe1 water_flow: {sys.links['Pipe1'].water_flow:.8f}")
+    print(f"Pipe1 added_flow: {sys.links['Pipe1'].added_flow:.8f}")
+
+    print("\nTank:")
+    print(f"Tank1 before: {tank_volume_before:.8f}")
+    print(f"Tank1 after:  {tank_volume_after:.8f}")
+    print(f"Tank1 lost:   {tank_volume_before - tank_volume_after:.8f}")
+
+    print("\nPots:")
+    for pot_name in ['Pot1', 'Pot2', 'Pot3', 'Pot4']:
+        print(f"{pot_name} water in: {sys.nodes[pot_name].step_water_in:.8f}")
+
+    expected = {
+        'Pipe2': 0.02500000,
+        'Pipe3': 0.01538462,
+        'Pipe4': 0.00961538,
+        'Pipe5': 0.00576923,
+        'Pipe6': 0.00384615,
+        'Pipe7': 0.00192308,
+        'Pipe8': 0.00192308,
+    }
+
+    tolerance = 1e-6
+
+    print("\nChecks:")
+
+    assert abs(sys.links['Pipe1'].water_flow - 0.025) < tolerance
+    assert abs(tank_volume_after - 49.975) < tolerance
+
+    for pipe_name, expected_volume in expected.items():
+        actual_volume = pipe_volumes[pipe_name]
+        assert abs(actual_volume - expected_volume) < tolerance, (
+            f"{pipe_name}: expected {expected_volume}, got {actual_volume}"
+        )
+
+    assert abs(sys.nodes['Pot1'].step_water_in - 0.01538462) < tolerance
+    assert abs(sys.nodes['Pot2'].step_water_in - 0.00576923) < tolerance
+    assert abs(sys.nodes['Pot3'].step_water_in - 0.00192308) < tolerance
+    assert abs(sys.nodes['Pot4'].step_water_in - 0.00192308) < tolerance
+
+    total_pot_in = sum(
+        sys.nodes[pot_name].step_water_in
+        for pot_name in ['Pot1', 'Pot2', 'Pot3', 'Pot4']
+    )
+
+    assert abs(total_pot_in - sys.links['Pipe1'].water_flow) < tolerance
+
+    print("All simulation checks passed.")
 
