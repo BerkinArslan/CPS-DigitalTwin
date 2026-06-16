@@ -22,7 +22,11 @@ def create_pipe_adjacency_dict(nodes: dict, links: dict):
 
     graph = {node_name: [] for node_name in nodes}
 
-    pipes = {name : link for name, link in links.items() if link is not Pump}
+    pipes = {
+        name: link
+        for name, link in links.items()
+        if isinstance(link, Pipe)
+    }
 
     for pipe_name, pipe in pipes.items():
         conductance = pipe_conductance(pipe)
@@ -32,7 +36,7 @@ def create_pipe_adjacency_dict(nodes: dict, links: dict):
 
     return graph
 
-def relevant_nodes(graph: dict, tanks: dict, pots: dict):
+def relevant_nodes(graph: dict, tanks, pots):
     """
     Depth first search for all the nodes in-between a tank and a source
     To make sure that there is no pipes that lead to nowhere

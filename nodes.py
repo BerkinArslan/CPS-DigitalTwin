@@ -90,6 +90,7 @@ class Pot(Node):
 
         #Dynamic simulation states
         self.moisture = initial_moisture
+        self.step_water_in = 0.0
 
     # TODO:
     #  Import implemented mathematical model and use it in this method
