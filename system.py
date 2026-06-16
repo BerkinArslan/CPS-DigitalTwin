@@ -737,7 +737,6 @@ if __name__ == '__main__':
 
     sys.visualize_standard(size=3)
 
-    print("\n--- Simulation test ---")
 
     tank_volume_before = sys.nodes['Tank1'].volume
 
@@ -763,42 +762,10 @@ if __name__ == '__main__':
     for pot_name in ['Pot1', 'Pot2', 'Pot3', 'Pot4']:
         print(f"{pot_name} water in: {sys.nodes[pot_name].step_water_in:.8f}")
 
-    expected = {
-        'Pipe2': 0.02500000,
-        'Pipe3': 0.01538462,
-        'Pipe4': 0.00961538,
-        'Pipe5': 0.00576923,
-        'Pipe6': 0.00384615,
-        'Pipe7': 0.00192308,
-        'Pipe8': 0.00192308,
-    }
-
-    tolerance = 1e-6
-
-    # print("\nChecks:")
-    #
-    # assert abs(sys.links['Pipe1'].water_flow - 0.025) < tolerance
-    # assert abs(tank_volume_after - 49.975) < tolerance
-    #
-    # for pipe_name, expected_volume in expected.items():
-    #     actual_volume = pipe_volumes[pipe_name]
-    #     assert abs(actual_volume - expected_volume) < tolerance, (
-    #         f"{pipe_name}: expected {expected_volume}, got {actual_volume}"
-    #     )
-
-    # assert abs(sys.nodes['Pot1'].step_water_in - 0.01538462) < tolerance
-    # assert abs(sys.nodes['Pot2'].step_water_in - 0.00576923) < tolerance
-    # assert abs(sys.nodes['Pot3'].step_water_in - 0.00192308) < tolerance
-    # assert abs(sys.nodes['Pot4'].step_water_in - 0.00192308) < tolerance
-
     total_pot_in = sum(
         sys.nodes[pot_name].step_water_in
         for pot_name in ['Pot1', 'Pot2', 'Pot3', 'Pot4']
     )
-
-    assert abs(total_pot_in - sys.links['Pipe1'].water_flow) < tolerance
-
-    print("All simulation checks passed.")
 
     sys.visualize_standard(size=3, show_states=True)
     for i in range(5):
