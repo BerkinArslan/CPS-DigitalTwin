@@ -51,6 +51,24 @@ def reference_evapotranspiration(
         isobar_specific_of_air: float = 0.001005
 )->float:
     
+<<<<<<< HEAD
+    latent_heat_of_evaporation = 2.501 - 0.00236 * temperature_in_Celsius #λ (lambda)
+    
+    slope_vapour_pressure = (4098 * (0.6108 * math.exp((17.27 * (temperature_in_Celsius + 273.15)) / ((temperature_in_Celsius + 273.15) + 237.3))))/ \
+        (((temperature_in_Celsius + 273.15) + 237.3) ** 2) # Δ (delta) 
+    
+    saturation_vapour_pressure = 0.6108 * math.exp((17.27 * (temperature_in_Celsius + 273.15)) / ((temperature_in_Celsius + 273.15) + 237.3)) #e^0(T)
+    actual_vapour_pressure = saturation_vapour_pressure * (relative_humidity/100) 
+    vapour_pressure_deficit = saturation_vapour_pressure - actual_vapour_pressure #D_a
+
+    aerodynamic_resistance = 208/wind_speed #this is aerodynamic_resistance, not the reference crop #r_a
+    aerodynamic_conductance = 1/aerodynamic_resistance #G_a
+
+    canopy_resistance = 70 #r_c
+    canopy_conductance = 1/canopy_resistance #G_c
+
+    soil_moisture_factor = (soil_moisture_content - min_soil_moisture_content) / (max_soil_moisture_content - min_soil_moisture_content) #f
+=======
     latent_heat_of_evaporation = 2.501 - 0.00236 * temp_c
     
     # slope_vapour_pressure = (4098 * (0.6108 * math.exp((17.27 * (temp_c + 273.15)) / ((temp_c + 273.15) + 237.3))))/ \
@@ -75,19 +93,37 @@ def reference_evapotranspiration(
     canopy_conductance = 1 / canopy_resistance
 
     soil_moisture_factor = (soil_moisture - min_soil_moisture) / (max_soil_moisture - min_soil_moisture)
+>>>>>>> origin/main
 
     # numerator (first term)
+<<<<<<< HEAD
+    numerator1 = slope_vapour_pressure * canopy_energy_absorption + \
+                (air_density * isobar_specific_of_air / pschometic_constant) * \
+                vapour_pressure_deficit * aerodynamic_conductance
+                #Δ·A_c + (ρ·c_p/γ)·D_a·G_a
+    
+    # denominator (first term)
+    denominator1 = slope_vapour_pressure + 1 + (aerodynamic_conductance / canopy_conductance) #Δ + 1 + (G_a/G_c)
+=======
     numerator1 = slope_vapour_pressure_ratio * canopy_energy_absorption + \
                  (air_density * isobar_specific_of_air / psychometric_constant) * \
                  vapour_pressure_deficit * aerodynamic_conductance * 86400
     
     # denominator (first term)
     denominator1 = slope_vapour_pressure_ratio + 1 + (aerodynamic_conductance / canopy_conductance)
+>>>>>>> origin/main
 
-    term1 = numerator1 / denominator1
+    term1 = numerator1 / denominator1  
 
 
     # second term
+<<<<<<< HEAD
+    term2 = (soil_moisture_factor * slope_vapour_pressure * soil_energy_absorption) / (slope_vapour_pressure + 1) #( f·Δ·A_s ) / ( Δ + 1 )
+
+    #reference evapotranspiration
+    ref_ET = (term1 + term2) / latent_heat_of_evaporation 
+    return ref_ET
+=======
     term2 = ((soil_moisture_factor * slope_vapour_pressure_ratio * soil_energy_absorption)
              / (slope_vapour_pressure_ratio + 1))
 
@@ -146,6 +182,7 @@ if __name__ == "__main__":
 
     print(f'water loss after one day: {water_loss}')
 
+>>>>>>> origin/main
 
 
 
