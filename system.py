@@ -6,6 +6,7 @@ This will also include global settings for simulation and simulation method
 
 """
 import utils
+from evapotranspiration import crop_evapotranspiration, reference_evapotranspiration, water_volume_loss_to_evaporation
 from links import Pump, Pipe
 from nodes import WaterTank, Pot, Node
 from matplotlib import pyplot as plt
@@ -594,6 +595,54 @@ class IrrigationSystem:
 
         return pipe_volumes
 
+    def evapotranspiration_simulation_step(self,
+                                           step_time_seconds: float,
+                                           t_celcius: float,
+                                           wind_speed: float,
+                                           irradiation: float,
+                                           soil_albedo: float,
+                                           soil_absorption_ratio: float,
+                                           evaporation_efficiency: float = 0.45
+                                           ):
+        """
+        Calcualtes the water loss in that time step for the given schedule
+        Updates the moisture level and the water level in that pot
+        :param schedule: if multiple steps re to be simulated the i-th step
+        :return:
+        """
+        day = 60 * 60 * 24
+        divider = step_time_seconds / day
+
+        irradiation_work = irradiation * 24 * 3600 / 1e6
+        plant_energy_absorption = (1- soil_absorption_ratio) * evaporation_efficiency * irradiation_work
+        soil_energy_absorption = irradiation_work * (1 - soil_albedo) * soil_absorption_ratio
+        pot_names = [pot_name for pot_name, pot in self.nodes.items() if isinstance(pot, Pot) ]
+        for pot_name in pot_names:
+
+            ref_et = reference_evapotranspiration(
+                temp_c=t_celcius,
+                wind_speed=wind_speed,
+                soil_moisture=self.nodes[pot_name].moisture,
+                min_soil_moisture=self.nodes[pot_name].min_moisture,
+                max_soil_moisture=self.nodes[pot_name].max_moisture,
+                canopy_energy_absorption=plant_energy_absorption,
+                soil_energy_absorption=soil_energy_absorption,
+            )
+
+            pot_et = crop_evapotranspiration(ref_et,
+                                             crop_coefficient=1,
+                                             balcony_microclimate_correction=0.7)
+
+            water_loss = water_volume_loss_to_evaporation(pot_et,
+                                                          pot_area=0.08)
+
+            water_loss = water_loss / divider
+            print(f'water_loss: {water_loss}')
+
+            self.nodes[pot_name].water_volume = self.nodes[pot_name].water_volume - water_loss
+            self.nodes[pot_name].update_moisture()
+
+
 if __name__ == '__main__':
 
     sys = IrrigationSystem()
@@ -754,7 +803,6 @@ if __name__ == '__main__':
 
     pipe_volumes = sys.flow_simulation_step(schedule=0)
 
-
     tank_volume_after = sys.nodes['Tank1'].volume
 
     print("\nPipe volumes:")
@@ -781,6 +829,18 @@ if __name__ == '__main__':
 
     sys.visualize_standard(size=3, show_states=True)
     for i in range(5):
-        pipe_volumes = sys.flow_simulation_step(schedule=i)
+        pipe_volumes = sys.flow_simulation_step(schedule=0)
+
+        sys.visualize_standard(size=3, show_states=True)
+
+        sys.evapotranspiration_simulation_step(
+            step_time_seconds=24*60*60,
+            t_celcius=22,
+            wind_speed=5,
+            irradiation=300,
+            soil_albedo=0.2,
+            soil_absorption_ratio=0.3,
+        )
+
         sys.visualize_standard(size=3, show_states=True)
 

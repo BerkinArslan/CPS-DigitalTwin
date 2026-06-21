@@ -102,6 +102,7 @@ class Pot(Node):
         :return:moisture level
         """
         self.water_volume = self.water_volume +  self.step_water_in
+        self.step_water_in = 0.0
         self.calculate_moisture_from_water_volume()
 
     def calculate_moisture_from_water_volume(self):
