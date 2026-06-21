@@ -14,6 +14,11 @@ from matplotlib.collections import PatchCollection
 import numpy as np
 
 
+#TODO:
+# Change network solvers names and parameters.
+# they take solve from tank to pump anf from pump to pot
+
+
 class IrrigationSystem:
 
 
@@ -229,8 +234,10 @@ class IrrigationSystem:
                 )
                 ax.add_patch(plant_shape)
                 ax.add_patch(pot_shape)
-                ax.text(x - 0.3*size, y - 0.1*size, f'{100 * (node.moisture - node.min_moisture) /\
-                    (node.max_moisture + node.min_moisture):.0f}%',
+                # ax.text(x - 0.3*size, y - 0.1*size, f'{100 * (node.moisture - node.min_moisture) /\
+                #     (node.max_moisture + node.min_moisture):.0f}%',
+                #         fontsize=3*size, color='white')
+                ax.text(x - 0.3*size, y - 0.1*size, f'{100 * node.moisture:.0f}%',
                         fontsize=3*size, color='white')
             else:
                 ax.scatter(x, y, c='black')
@@ -576,6 +583,11 @@ class IrrigationSystem:
                 self.nodes[pot_name].step_water_in = (
                     self.nodes[pot_name].step_water_in + volume
                 )
+                self.nodes[pot_name].update_moisture()
+                print(f'{pot_name} water_in: {volume},'
+                      f' total_water: {self.nodes[pot_name].water_volume}, '
+                      f'moisture: {self.nodes[pot_name].moisture}, '
+                      f'total_volume: {self.nodes[pot_name].soil_volume}')
 
         for pipe_name, volume in pipe_volumes.items():
             self.links[pipe_name].water_flow = volume
@@ -636,7 +648,7 @@ if __name__ == '__main__':
         soil_volume = 10,
         max_moisture = 100,
         min_moisture = 0,
-        initial_moisture = 54,
+        initial_moisture = 0.54,
     )
 
     sys.add_pipe(
@@ -670,7 +682,7 @@ if __name__ == '__main__':
         soil_volume = 10,
         max_moisture = 100,
         min_moisture = 0,
-        initial_moisture = 74,
+        initial_moisture = 0.74,
     )
 
     sys.add_pipe(
@@ -704,7 +716,7 @@ if __name__ == '__main__':
         soil_volume=10,
         max_moisture=100,
         min_moisture=0,
-        initial_moisture=38,
+        initial_moisture=0.38,
     )
 
     sys.add_pipe(
@@ -723,7 +735,7 @@ if __name__ == '__main__':
         soil_volume=10,
         max_moisture=100,
         min_moisture=0,
-        initial_moisture=67,
+        initial_moisture=0.67,
     )
 
     sys.add_pipe(

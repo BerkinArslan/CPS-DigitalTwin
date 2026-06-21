@@ -91,14 +91,36 @@ class Pot(Node):
         #Dynamic simulation states
         self.moisture = initial_moisture
         self.step_water_in = 0.0
+        self.water_volume = self.calculate_water_volume_from_moisture()
 
     # TODO:
     #  Import implemented mathematical model and use it in this method
-    def update_moisture(self, water_flow):
+    def update_moisture(self):
         """
         Updates the moisture level of the pot according to mathematical model
         :param water_flow: input water flow (rain or irrigation)
-        :return:
+        :return:moisture level
         """
-        return
+        self.water_volume = self.water_volume +  self.step_water_in
+        self.calculate_moisture_from_water_volume()
 
+    def calculate_moisture_from_water_volume(self):
+        """
+        calcualtes the moisture from water volume in the pot
+        """
+        #first dummy function
+        if self.water_volume > self.soil_volume:
+            self.water_volume = self.soil_volume
+        self.moisture = self.water_volume / self.soil_volume
+        return self.moisture
+
+
+    def calculate_water_volume_from_moisture(self):
+        """
+        calculates the water volume from the moisture
+        """
+        #first dummy function
+        self.water_volume = self.moisture * self.soil_volume
+        if self.water_volume > self.soil_volume:
+            self.water_volume = self.soil_volume
+        return self.water_volume
