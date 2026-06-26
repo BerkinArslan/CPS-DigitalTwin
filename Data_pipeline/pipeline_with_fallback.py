@@ -1,350 +1,576 @@
+import csv
 import json
+import os
 import time
 import requests
 import paho.mqtt.client as mqtt
 
 
-"""
-The given ENVIRONMENT_SCHEMA is a nested dictionary, meaning that each key maps to another dictionary, and that inner dictionary can itself 
-contain further dictionaries. This structure allows organizing complex data hierarchically. In this case, the outer keys are topics, each topic 
-maps to a dictionary of variables (like temperature_c), and each variable maps to another dictionary containing properties such as type and valid 
-range. To access values, you chain keys step by step: first access the topic, then the variable, then the property. For example,
-ENVIRONMENT_SCHEMA["spBv1.0/p03/DDATA/sensor-main/temperature"]["temperature_c"]["valid_range"]
-returns the range (-40.0, 85.0).
-"""
+# =============================================================================
+# SCHEMAS
+# Each schema maps one MQTT topic to the fields that topic carries.
+# Each field has a "type" that tells _process_field how to validate it:
+#   "range"  -> numeric, checked against (min, max)
+#   "enum"   -> string, must be one of valid_values
+#   "string" -> freeform text, just checked to be a str
+#   "object" -> nested dict (e.g. location, staleness from P07)
+#   "array"  -> list of items (e.g. forecast_hours from P07)
+# =============================================================================
+
+# P03: one combined topic as of 2025-06 (was three separate topics before).
+# humidity_rel was previously called humidity_pct.
+# light_lux max corrected to 65535 (BH1750 hardware limit).
+# sensor_error replaces sensor_disconnected in their status enum.
 ENVIRONMENT_SCHEMA = {
-    "spBv1.0/p03/DDATA/sensor-main/temperature": {
+    "spBv1.0/cps/DDATA/p03-node/env_main": {
+        "timestamp":     {"type": "string"},
         "temperature_c": {"type": "range", "valid_range": (-40.0, 85.0)},
-    },
-    "spBv1.0/p03/DDATA/sensor-main/humidity": {
-        "humidity_pct": {"type": "range", "valid_range": (0.0, 100.0)},
-    },
-    "spBv1.0/p03/DDATA/sensor-main/light": {
-        "light_lux": {"type": "range", "valid_range": (0.0, 130000.0)},
+        "humidity_rel":  {"type": "range", "valid_range": (0.0, 100.0)},
+        "pressure_hpa":  {"type": "range", "valid_range": (300.0, 1100.0)},
+        "light_lux":     {"type": "range", "valid_range": (0.0, 65535.0)},
+        "status":        {"type": "enum",
+                          "valid_values": ["ok", "sensor_error", "out_of_range", "stale"]},
     },
 }
- 
+
+
 SOIL_MOISTURE_SCHEMA = {
-    "spBv1.0/p01/DDATA/sensor-main/soil_moisture": {
+    "spBv1.0/P01/DDATA/sensor-main/soil_moisture": {
+        "timestamp":  {"type": "string"},
         "calibrated": {"type": "range", "valid_range": (0.0, 1.0)},
+        "raw_adc":    {"type": "range", "valid_range": (0, 65536)},
+        "status":     {"type": "enum",
+                       "valid_values": ["ok", "sensor_disconnected", "out_of_range"]},
     },
 }
- 
-PUMP_SCHEMA = {
-    "spBv1.0/p02/DDATA/actuator-main/pump": {
-        # valid_range is None: source documentation gives no numeric bound.
-        "running_time":     {"type": "range", "valid_range": None},
-        "volume_l":         {"type": "range", "valid_range": None},
-        "status":           {"type": "enum",  "valid_values": ["running", "idle", "error"]},
+
+
+# P07: location and staleness are real nested dicts; forecast_hours and
+# daily_et_summary are real lists. No second json.loads() needed.
+# Always check status first -- if "unavailable", arrays are empty.
+WEATHER_API_SCHEMA = {
+    "spBv1.0/P07/NDATA/weather-pipeline": {
+        "generated_at":     {"type": "string"},
+        "data_source":      {"type": "enum",   "valid_values": ["open-meteo"]},
+        "location":         {"type": "object"},  # {"name", "latitude", "longitude"}
+        "forecast_hours":   {"type": "array"},   # list of hourly dicts, up to 48
+        "daily_et_summary": {"type": "array"},   # list of daily dicts
+        "staleness":        {"type": "object"},  # {"is_cached", "fetched_at", "hours_old"}
+        "status":           {"type": "enum",
+                             "valid_values": ["live", "cached", "unavailable"]},
+        "message":          {"type": "string"},  # only present when status=unavailable
     },
 }
- 
-WATER_CONTROLLING_SCHEMA = {
-    "spBv1.0/p02/DCMD/actuator-main/pump": {
-        "type":             {"type": "enum", "valid_values": ["run_for_duration", "stop", "emergency_stop"],},
-        "pump_runtime_s":   {"type": "range","valid_range": (1, 120),},
-            # NOTE: only required when type == "run_for_duration", ignored
-            # otherwise. That conditional logic isn't expressible in this
-            # dict -- it would need to live in validation code, not here.
-        
-    },
-    "spBv1.0/p05/NDATA/watering-controller": {
-        "state":            {"type": "enum", "valid_values": ["idle", "soaking", "watering", "suppressed", "error"],},
-    },
-}
- 
-# Merge all schemas into one lookup table the pipeline reads from.
-# ** unpacks each dict's key-value pairs into the new combined dict --
-# {dict1, dict2} would try to build a SET and crash, since dicts can't
-# be set elements (they're unhashable).
+
 SCHEMA = {
     **ENVIRONMENT_SCHEMA,
     **SOIL_MOISTURE_SCHEMA,
-    **PUMP_SCHEMA,
-    **WATER_CONTROLLING_SCHEMA,
+    **WEATHER_API_SCHEMA,
 }
- 
-# Status values that mean "do not trust this value" -- shared across every
-# sensor group's "status" field, since they all use this same vocabulary
-# to mean the same thing. P02's "running|idle|error" and P05's "state" are
-# a DIFFERENT concept (operational state, not data trust) -- those live in
-# each field's own "valid_values" above, not in this set.
-BAD_STATUSES = {"sensor_disconnected", "out_of_range", "stale"}
- 
- 
-# ─────────────────────────────────────────────
+
+# Short readable label for each topic, used in terminal output.
+TOPIC_LABEL = {
+    "spBv1.0/cps/DDATA/p03-node/env_main":        "P03",
+    "spBv1.0/P01/DDATA/sensor-main/soil_moisture": "P01",
+    "spBv1.0/P07/NDATA/weather-pipeline":          "P07",
+}
+
+# Status values from P01/P03/P07 that mean "do not trust this reading".
+# P07 uses different vocabulary (live/cached/unavailable), handled separately.
+BAD_STATUSES = {"sensor_disconnected", "sensor_error", "out_of_range", "stale"}
+
+# Maximum hours of sensor history to keep in the CSV log.
+# When this limit is exceeded, the old file is deleted and a new one starts.
+MAX_LOG_HOURS = 8
+
+# Path to the CSV log file — same folder as this script.
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sensor_log.csv")
+
+
+# =============================================================================
 # CLASS: WeatherFallback
-# Plan B for fields that have a real external substitute: calls OpenMeteo
-# to get a stand-in value when the real sensor (P03) can't be trusted.
-# This class knows nothing about MQTT -- it only knows how to ask OpenMeteo
-# for a number. That separation is what lets it be reused or tested on its
-# own, independent of the pipeline that calls it.
-# ─────────────────────────────────────────────
+# Plan B for temperature_c and humidity_rel when P03 cannot be trusted.
+# Calls OpenMeteo using coordinates provided by P07 at runtime.
+# lat/lng start as None and are updated when the first P07 message arrives.
+# =============================================================================
 class WeatherFallback:
-    def __init__(self, latitude: float, longitude: float):
-        self.latitude = latitude
+    def __init__(self, latitude, longitude):
+        self.latitude  = latitude
         self.longitude = longitude
         self.url = "https://api.open-meteo.com/v1/forecast"
- 
+
+    def _coords_ready(self):
+        return self.latitude is not None and self.longitude is not None
+
     def get_temperature(self):
-        """Plan B for temperature_c. Returns float or None if this also fails."""
-        try:
-            params = {
-                "latitude": self.latitude,
-                "longitude": self.longitude,
-                "current": "temperature_2m",
-            }
-            response = requests.get(self.url, params=params, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            return data["current"]["temperature_2m"]
-        except (requests.RequestException, KeyError, ValueError) as e:
-            print(f"[Fallback] OpenMeteo also failed: {e}")
-            return None  # signals: even Plan B failed, go to Plan C (escalate)
- 
-    def get_humidity(self):
-        """Plan B for humidity_pct."""
-        try:
-            params = {
-                "latitude": self.latitude,
-                "longitude": self.longitude,
-                "current": "relative_humidity_2m",
-            }
-            response = requests.get(self.url, params=params, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            return data["current"]["relative_humidity_2m"]
-        except (requests.RequestException, KeyError, ValueError) as e:
-            print(f"[Fallback] OpenMeteo also failed: {e}")
+        if not self._coords_ready():
+            print("[Fallback] Coordinates not yet known; skipping OpenMeteo call.")
             return None
- 
- 
-# ─────────────────────────────────────────────
+        try:
+            params   = {"latitude": self.latitude, "longitude": self.longitude,
+                        "current": "temperature_2m"}
+            response = requests.get(self.url, params=params, timeout=5)
+            response.raise_for_status() #raise_for_status() method is part of the Requests library and is used to check if an HTTP request was successful
+            return response.json()["current"]["temperature_2m"] #It converts the HTTP response content into a Python dictionary (or list).
+            """
+            The expression response.json()["current"]["temperature_2m"] extracts a value from a nested JSON response returned by an API. First, response.json() 
+            converts the HTTP response into a Python dictionary. Then ["current"] accesses the nested dictionary under the key "current", and ["temperature_2m"] 
+            extracts the actual temperature value from that dictionary. The final result is a single value (usually a float), which is returned by the function.
+            """
+        except (requests.RequestException, KeyError, ValueError) as e:
+            print(f"[Fallback] OpenMeteo temperature failed: {e}")
+            return None
+
+    def get_humidity(self):
+        if not self._coords_ready():
+            print("[Fallback] Coordinates not yet known; skipping OpenMeteo call.")
+            return None
+        try:
+            params   = {"latitude": self.latitude, "longitude": self.longitude,
+                        "current": "relative_humidity_2m"}
+            response = requests.get(self.url, params=params, timeout=5)
+            response.raise_for_status()
+            return response.json()["current"]["relative_humidity_2m"]
+        except (requests.RequestException, KeyError, ValueError) as e:
+            print(f"[Fallback] OpenMeteo humidity failed: {e}")
+            return None
+
+    def get_pressure(self):
+        if not self._coords_ready():
+            print("[Fallback] Coordinates not yet known; skipping OpenMeteo call.")
+            return None
+        try:
+            params = {"latitude": self.latitude, "longitude": self.longitude,
+                      "current": "surface_pressure"}
+            response = requests.get(self.url, params= params, timeout=5 ) #A timeout defines how long a program will wait for a server’s response before aborting the connection. It ensures your code doesn’t get stuck when the server is too slow or unreachable.
+            response.raise_for_status()
+            return response.json()["current"]["surface_pressure"]
+        except (requests.RequestException, KeyError, ValueError) as e:
+            print(f"[Fallback] OpenMeteo humidity failed: {e}")
+            return None
+
+# =============================================================================
 # CLASS: LastKnownValueFallback
-# Plan B for fields where a brief gap is NOT a hardware fault -- e.g. a
-# missed publish interval on volume_l or soil moisture. Reuses the last
-# good reading instead of treating every gap as a full failure.
-# Reads from a cache it's GIVEN -- it never fetches anything new itself.
-# ─────────────────────────────────────────────
+# Plan B for fields where a short gap is tolerable (e.g. soil moisture).
+# Reads from last_raw_values -- the exact last trusted reading, never averaged.
+# =============================================================================
 class LastKnownValueFallback:
     def __init__(self, cache: dict):
-        # Takes the pipeline's OWN latest_values dict rather than keeping a
-        # private copy, so there is exactly one place holding "the last good
-        # value per field" -- two separate caches could drift out of sync.
-        self.cache = cache
- 
-    def get(self, field_name: str):
-        # Returns the last known good value, or None if we've never
-        # received a good value for this field yet (e.g. right at startup).
+        self.cache = cache  # same dict object as pipeline.last_raw_values
+
+    def get_last_value(self, field_name: str):
         return self.cache.get(field_name)
- 
- 
-# ─────────────────────────────────────────────
-# CLASS: NoFallback
-# Documents INTENT for fields with no substitute at all (e.g. the pump's
-# running state -- there is nothing else that can tell you if it's running).
-# Kept as a real class instead of inlining "return None" so this decision
-# is visible and searchable in the code, not a placeholder someone forgot.
-# ─────────────────────────────────────────────
-class NoFallback:
-    def get(self):
-        return None
- 
- 
-# ─────────────────────────────────────────────
+
+
+# =============================================================================
 # CLASS: EnvironmentPipeline
-# Responsibility: subscribe to every topic in SCHEMA, validate each
-# incoming field against its rules, and for NUMERIC fields only, run the
-# tiered fallback chain (Plan A -> Plan B -> Plan C).
-#
-# IMPORTANT SCOPE NOTE: fallback is applied ONLY to
-# numeric ("range") fields. Enum fields (status, type, state) are
-# validated against valid_values, but if invalid, they go straight to
-# escalate -- there is no Plan B for "the pump's status string is wrong,"
-# only for missing/untrustworthy numeric readings.
-# ─────────────────────────────────────────────
+# Subscribes to every topic in SCHEMA, validates each field, and runs the
+# Plan A -> B -> C fallback chain for numeric fields.
+# =============================================================================
 class EnvironmentPipeline:
-    # Maps each numeric field to which fallback strategy applies to it.
-    # Adding a new numeric field's behavior is one line here, not a
-    # branching if/elif chain inside the logic below.
+
     FIELD_FALLBACK_STRATEGY = {
-        "temperature_c": "weather",
-        "humidity_pct": "weather",
-        "light_lux": "no_fallback",   # no online equivalent for balcony lux
-        "volume_l": "last_known",     # brief gaps tolerated, not a hardware fault
-        "calibrated": "last_known",   # same reasoning applies to soil moisture
-        "running_time": "no_fallback",  ### fill in: confirm with P02 if a strategy makes sense here
-        "pump_runtime_s": "no_fallback",  ### fill in: confirm with P05/P02 if a strategy makes sense here
+        "temperature_c":  "weather",
+        "humidity_rel":   "weather",
+        "pressure_hpa":   "weather",
+        "light_lux":      "no_fallback",
+        "calibrated":     "last_known",
+        "raw_adc":        "no_fallback",
     }
- 
-    def __init__(self, broker: str, port: int, weather_fallback: WeatherFallback):
-        self.weather_fallback = weather_fallback
-        self.latest_values = {}  # holds the most recent good value per field
- 
-        # Built after self.latest_values exists, since LastKnownValueFallback
-        # needs a reference to THIS pipeline's own cache.
-        self.last_known_fallback = LastKnownValueFallback(self.latest_values)
-        self.no_fallback = NoFallback()
- 
-        # Counts consecutive misses PER FIELD -- resets to 0 on any success,
-        # so a temperature miss streak doesn't affect humidity's count.
-        self.consecutive_misses = {}
- 
-        # Named constant instead of a bare "5" inside the logic below --
-        # changing tolerance later means editing one line here.
+
+    def __init__(self, broker: str, port: int, weather_fallback: WeatherFallback,
+                 window_seconds: float = 300, connect: bool = True):
+        self.weather_fallback  = weather_fallback
+        self.window_seconds    = window_seconds
+
+        self.value_buffer    = {}  # field -> [(timestamp, value), ...]
+        self.last_raw_values = {}  # field -> exact last trusted reading
+        self.latest_values   = {}  # field -> rolling average or latest value
+
+        self.last_known_fallback  = LastKnownValueFallback(self.last_raw_values)
+        self.consecutive_misses   = {}
         self.MAX_TOLERATED_MISSES = 5
- 
-        self.client = mqtt.Client()
+
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
-        self.client.connect(broker, port)
- 
-    def _on_connect(self, client, userdata, flags, rc):
-        if rc == 0:
+
+        if connect:
+            self.client.connect(broker, port)
+
+    # -------------------------------------------------------------------------
+    # MQTT CALLBACKS
+    # -------------------------------------------------------------------------
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties): # rc is reason code.
+        if not reason_code.is_failure:
             print("[Pipeline] Connected.")
             for topic in SCHEMA:
                 client.subscribe(topic)
                 print(f"[Pipeline] Subscribed: {topic}")
         else:
-            print(f"[Pipeline] Connection failed, code={rc}")
- 
+            print(f"[Pipeline] Connection failed: {reason_code}")
+
     def _on_message(self, client, userdata, message):
+        topic = message.topic # "spBv1.0/P01/DDATA/sensor-main/soil_moisture"
+        #topic is only ONE group's topic. Not all three. paho gives you one message at a time.
         """
-        Entry point for every incoming message, regardless of which schema
-        the topic belongs to. SCHEMA now maps each topic to a dict of
-        MULTIPLE fields (not just one), so we loop over every field defined
-        for this topic and validate/process each one individually.
+        paho creates a MQTTMessage object for every incoming message. It has two attributes you care about: message.topic — a string, 
+        e.g. "spBv1.0/P01/DDATA/sensor-main/soil_moisture" message.payload — the raw bytes of the message content, e.g. 
+        b'{"calibrated": 0.55}' So topic = message.topic just pulls that string out into a shorter variable name for convenience.
         """
-        topic = message.topic
-        field_definitions = SCHEMA.get(topic)
+        field_definitions = SCHEMA.get(topic) #SCHEMA.get(topic) uses the topic string as a key and pulls out only One groups main value
+        # finds your SOIL_MOISTURE_SCHEMA entry:
+        # {"timestamp": ..., "calibrated": ..., "raw_adc": ..., "status": ...}
         if field_definitions is None:
             print(f"[Pipeline] Unknown topic: {topic}")
             return
- 
+
+            # field_definitions = your rulebook from SCHEMA (what values SHOULD look like)
+            # data              = P03/P07's real message received over MQTT (actual values)
+            #
+            # For field_name = "temperature_c":
+            #   rules = {"type": "range", "valid_range": (-40.0, 85.0)}  <- your rule
+            #   value = 21.5                                              <- P03's real reading
+            #
+            # _process_field checks: does the real value obey the rule?
+
         try:
             data = json.loads(message.payload.decode())
+            """
+            data is now P01's real values
+            python{
+            "timestamp":     "2026-06-26T14:00:00Z",
+            "calibrated":    0.53,
+            "raw_adc":       4000,
+            "status":        "ok"
+            }
+            """
+            # .decode()    → '{"calibrated": 0.55, "status": "ok"}'   (string)
+            # json.loads() → {"calibrated": 0.55, "status": "ok"}     (Python dict)
         except json.JSONDecodeError:
-            print(f"[Pipeline] Malformed payload on {topic}, escalating.")
-            self._escalate(topic, "malformed payload")
+            self._escalate(topic, "malformed JSON payload") #Escalate is the method at the very bottom that immediately takes Fallback C
             return
- 
-        # status is read once per message (when present) since it applies
-        # to the whole payload, the same way P01/P03 use it.
-        status = data.get("status")
- 
-        for field_name, rules in field_definitions.items():
-            if field_name == "status":
-                continue  # status is the trust signal, not a value to process itself
-            value = data.get(field_name)
-            self._process_field(topic, field_name, value, status, rules)
- 
-    def _process_field(self, topic, field_name, value, status, rules):
-        """
-        Routes a single field to the correct validation path based on its
-        "type" tag: enum fields go to plain validation only (no fallback);
-        range fields go to the full Plan A/B/C fallback chain.
-        """
-        if rules["type"] == "enum":
-            self._validate_enum(topic, field_name, value, rules["valid_values"])
-        elif rules["type"] == "range":
-            self._run_fallback_chain(topic, field_name, value, status, rules["valid_range"])
- 
-    def _validate_enum(self, topic, field_name, value, valid_values):
-        """
-        Enum fields (status, type, state) have no numeric fallback -- per
-        decision, fallback is for numeric data only. An invalid enum
-        value goes straight to Plan C, skipping A/B entirely.
-        """
-        if value in valid_values:
-            print(f"[Plan A] {field_name} = {value} (valid)")
-            self.latest_values[field_name] = value
+
+        # P07 uses status to signal data freshness, not sensor health.
+        # If unavailable, arrays are empty, nothing useful to process.
+
+        if topic == "spBv1.0/P07/NDATA/weather-pipeline":
+            if data.get("status") == "unavailable":
+                self._escalate(topic, f"P07 unavailable: {data.get('message', '(no reason)')}")
+                # P07 sends "message" only when status is "unavailable", explaining why
+                # (e.g. "Cache too old: 26.3 hours"). The '(no reason)' default is a safety
+                # net so our escalation log is never blank if the key is missing.
+                return
+
+        status = data.get("status") # status = "ok"
+
+        for field_name, rules in field_definitions.items(): # For Calibrated, "type": "range", "valid_range": (0.0, 1.0) in "calibrated": {"type": "range", "valid_range": (0.0, 1.0)""
+            if field_name == "status" and topic != "spBv1.0/P07/NDATA/weather-pipeline":
+                continue
+            value = data.get(field_name) # 0.53 = data.get(Calibrated)
+            self._process_field(topic, field_name, value, status, rules) #(topic= spBv1.0/P01/DDATA/sensor-main/soil_moisture, field name= Calibrated, value= 0.53, status = ok, rules = {"type": "range", "valid_range": (0.0, 1.0)} )
+
+        # Print one clean summary line per message (Option 1).
+        # Only numeric range fields are shown -- strings, objects, arrays are skipped
+        # to keep the line short. Warnings and errors print separately above.
+        label        = TOPIC_LABEL.get(topic, topic)
+        numeric_fields = {
+            fn: data.get(fn)
+            for fn, rules in field_definitions.items()
+            if rules["type"] == "range" and data.get(fn) is not None
+        }
+        if numeric_fields:
+            summary = "  ".join(f"{k}={v}" for k, v in numeric_fields.items())
+            print(f"[{label}] status={status}  {summary}")
+
+    # -------------------------------------------------------------------------
+    # FIELD ROUTING
+    # -------------------------------------------------------------------------
+
+    def _process_field(self, topic, field_name, value, status, rules): #(topic= spBv1.0/P01/DDATA/sensor-main/soil_moisture, field name= Calibrated, value= 0.53, status = ok, rules = {"type": "range", "valid_range": (0.0, 1.0)} )
+        field_type = rules["type"]  # rules = {"type": "range", "valid_range": (0.0, 1.0)} → field_type = "range"
+
+        if field_type == "range":
+            self._run_fallback_chain(topic, field_name, value, status, rules["valid_range"])  #(topic= spBv1.0/P01/DDATA/sensor-main/soil_moisture, field name= Calibrated, value= 0.53, status = ok,  rules["valid_range"] = (0.0, 1.0)} )
+        elif field_type == "enum":
+            self._validate_enum(topic, field_name, value, rules["valid_values"])  # rules["valid_values"] = ["ok", "sensor_disconnected", "out_of_range"]
+        elif field_type == "string":
+            self._validate_string(topic, field_name, value)  # value = "2026-06-26T14:00:00Z"
+        elif field_type == "object":
+            self._validate_object(topic, field_name, value)  # value = {"name": "berlin", "latitude": 52.52, "longitude": 13.405}
+        elif field_type == "array":
+            self._validate_array(topic, field_name, value)  # value = [{"time": "...", "temperature_c": 21.5, ...}, ...]
+        else:
+            print(f"[Pipeline] Unknown field type '{field_type}' for {field_name}")
+
+    # -------------------------------------------------------------------------
+    # VALIDATION METHODS
+    # -------------------------------------------------------------------------
+
+    def _validate_enum(self, topic, field_name, value, valid_values): #(topic= spBv1.0/P01/DDATA/sensor-main/soil_moisture, field name= status, value= 0.53, status = ok,  rules["valid_range"] = (0.0, 1.0)} )
+        if value in valid_values:  # "ok" in ["ok", "sensor_disconnected", "out_of_range"] → True
+            self.latest_values[field_name] = value  # latest_values["status"] = "ok"
         else:
             self._escalate(topic, f"{field_name}='{value}' not in {valid_values}")
- 
-    def _run_fallback_chain(self, topic, field_name, value, status, valid_range):
-        """
-        Plan A -> Plan B -> Plan C for NUMERIC fields only, in that order,
-        stopping at the first success.
-        """
-        # ── Plan A: the real sensor value, trusted only if status is "ok"
-        # (when status exists) AND the value falls inside its valid_range
-        # (when a range is defined -- some fields like running_time have
-        # valid_range=None, meaning we skip the range check entirely). ──
-        in_range = True
-        if valid_range is not None and value is not None:
-            in_range = valid_range[0] <= value <= valid_range[1]
- 
-        status_ok = (status is None) or (status not in BAD_STATUSES)
- 
-        if status_ok and value is not None and in_range:
-            print(f"[Plan A] {field_name} = {value} (status={status})")
+
+    def _validate_string(self, topic, field_name, value):
+        if value is None:
+            return
+        if isinstance(value, str):
             self.latest_values[field_name] = value
+        else:
+            self._escalate(topic, f"{field_name} expected str, got {type(value).__name__}")
+
+    def _validate_object(self, topic, field_name, value):
+        if value is None:
+            return
+        if not isinstance(value, dict):
+            self._escalate(topic, f"{field_name} expected dict, got {type(value).__name__}")
+            return
+
+        self.latest_values[field_name] = value
+
+        # location carries GPS coordinates that WeatherFallback needs.
+        # Update on every P07 message so coords stay current.
+        if field_name == "location":
+            lat = value.get("latitude")   # value = {"name": "berlin", "latitude": 52.52, "longitude": 13.405} → lat = 52.52
+            lng = value.get("longitude")  # lng = 13.405
+            if lat is not None and lng is not None:
+                self.weather_fallback.latitude  = lat
+                self.weather_fallback.longitude = lng
+            else:
+                print("[WARNING] P07 location missing latitude/longitude keys.")
+
+    def _validate_array(self, topic, field_name, value):
+        if value is None:
+            return
+        if not isinstance(value, list):
+            self._escalate(topic, f"{field_name} expected list, got {type(value).__name__}")
+            return
+
+        self.latest_values[field_name] = value
+
+    # -------------------------------------------------------------------------
+    # PLAN A / B / C FALLBACK CHAIN
+    # -------------------------------------------------------------------------
+
+    def _run_fallback_chain(self, topic, field_name, value, status, valid_range):   #(topic= spBv1.0/P01/DDATA/sensor-main/soil_moisture, field name= Calibrated, value= 0.53, status = ok, valid_range = (0.0, 1.0)} )
+        # Plan A: trust the sensor if status is clean and value is in range.
+        in_range  = True
+        if valid_range is not None and value is not None: #True
+            in_range = valid_range[0] <= value <= valid_range[1]  # (0.0) <= 0.53 <= (1.0) → True
+
+        status_ok = (status is None) or (status not in BAD_STATUSES)  # "ok" not in BAD_STATUSES → True
+
+        if status_ok and value is not None and in_range: # if True and True is True and True:
+            self._record_good_value(field_name, value)  # stores exact value in latest_values, last_raw_values, and rolling buffer
             self.consecutive_misses[field_name] = 0
             return
- 
-        print(f"[Pipeline] {field_name} status='{status}', value={value} -> not trusted.")
- 
-        # ── Plan B: strategy depends on the field ──
-        strategy = self.FIELD_FALLBACK_STRATEGY.get(field_name, "no_fallback")
+
+        # Plan B: use the assigned fallback strategy.
+        strategy       = self.FIELD_FALLBACK_STRATEGY.get(field_name, "no_fallback")
         fallback_value = None
- 
+
         if strategy == "weather":
-            ### fill in: print a message here showing which field is being attempted via OpenMeteo
             if field_name == "temperature_c":
                 fallback_value = self.weather_fallback.get_temperature()
-            elif field_name == "humidity_pct":
+            elif field_name == "humidity_rel":
                 fallback_value = self.weather_fallback.get_humidity()
-            # weather fields don't use the tolerate-then-escalate miss
-            # counter -- OpenMeteo either answers right now or it doesn't.
- 
+            elif field_name == "pressure_hpa":
+                fallback_value = self.weather_fallback.get_pressure()
+            if fallback_value is not None:
+                print(f"[WARNING] {field_name}: sensor status='{status}', using OpenMeteo fallback = {fallback_value}")
+
         elif strategy == "last_known":
-            self.consecutive_misses[field_name] = self.consecutive_misses.get(field_name, 0) + 1
+            self.consecutive_misses[field_name] = (
+                self.consecutive_misses.get(field_name, 0) + 1
+            )
             miss_count = self.consecutive_misses[field_name]
- 
             if miss_count <= self.MAX_TOLERATED_MISSES:
-                fallback_value = self.last_known_fallback.get(field_name)
-                ### fill in: print a message here showing the miss_count and the value used
+                fallback_value = self.last_known_fallback.get_last_value(field_name)
+                print(f"[WARNING] {field_name}: sensor status='{status}', miss #{miss_count}/{self.MAX_TOLERATED_MISSES}, using last known = {fallback_value}")
             else:
-                ### fill in: print a message here explaining MAX_TOLERATED_MISSES was exceeded
-                pass
-                # NOTE: this only catches misses IN A ROW. A repeating
-                # pattern of misses spread across separate episodes (3 now,
-                # 2 later, 4 even later) needs a different mechanism -- a
-                # rolling time-window tracker -- not implemented here yet.
- 
-        # strategy == "no_fallback" falls through with fallback_value=None
- 
+                print(f"[WARNING] {field_name}: {miss_count} consecutive misses, exceeded limit.")
+
         if fallback_value is not None:
-            print(f"[Plan B] {field_name} = {fallback_value} (strategy={strategy})")
             self.latest_values[field_name] = fallback_value
             return
- 
-        # ── Plan C: escalate, nothing worked ──
-        self._escalate(topic, f"{field_name} unavailable from sensor and fallback")
- 
+
+        # Plan C: nothing worked.
+        self._escalate(topic, f"{field_name} unavailable from sensor and all fallbacks")
+
+    # -------------------------------------------------------------------------
+    # ROLLING BUFFER
+    # -------------------------------------------------------------------------
+
+    def _record_good_value(self, field_name: str, value: float): # _record_good_value(Calibrated, o.53)
+        now = time.time() #time.time() gives the current time as a big float — seconds since January 1, 1970. Example: 1234567890.0. 
+
+        self.last_raw_values[field_name] = value  # last_raw_values["calibrated"] = 0.53  (exact reading, never averaged)
+        self.latest_values[field_name]   = value  # latest_values["calibrated"] = 0.53  (exact latest reading, not an average)
+
+        # Log this trusted reading to the CSV file for 8-hour history.
+        self._log_to_csv(field_name, value, now)
+
+        # Keep the rolling buffer for get_average() -- used internally by the fallback chain.
+        # setdefault: if "calibrated" key doesn't exist yet, create it with an empty list first.
+        self.value_buffer.setdefault(field_name, []).append((now, value))  # value_buffer["calibrated"] = [(1234567890.0, 0.53), ...]
+
+        cutoff = now - self.window_seconds  # e.g. 1234567890.0 - 300 = 1234567590.0  (5 minutes ago)
+
+        # Keep only readings from the last N minutes (window_seconds), discard older ones.
+        fresh_readings = []
+        for (t, v) in self.value_buffer[field_name]:
+            if t >= cutoff:
+                fresh_readings.append((t, v))
+        self.value_buffer[field_name] = fresh_readings
+
+    # -------------------------------------------------------------------------
+    # CSV LOGGING
+    # -------------------------------------------------------------------------
+
+    def _log_to_csv(self, field_name: str, value: float, timestamp: float):
+        # If the file exists and its first row is older than MAX_LOG_HOURS, delete it.
+        # This starts a fresh 8-hour collection cycle.
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE, "r") as f:
+                reader = csv.reader(f)
+                next(reader, None)  # skip the header row
+                first_row = next(reader, None)  # get the first data row
+            if first_row is not None:
+                first_timestamp = float(first_row[0])
+                hours_stored = (timestamp - first_timestamp) / 3600
+                if hours_stored >= MAX_LOG_HOURS:
+                    os.remove(LOG_FILE)  # delete old file, start fresh
+                    print(f"[Log] 8-hour limit reached. Old log deleted, starting fresh.")
+
+        # If file doesn't exist yet, write the header row first.
+        file_exists = os.path.exists(LOG_FILE)
+        with open(LOG_FILE, "a", newline="") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["timestamp_unix", "timestamp_utc", "field", "value"])
+            utc_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))
+            writer.writerow([timestamp, utc_str, field_name, value])
+
+    # -------------------------------------------------------------------------
+    # PUBLIC ACCESSORS
+    # -------------------------------------------------------------------------
+
+    def get_average(self, field_name: str):
+        if field_name not in self.value_buffer:
+            return None
+        now    = time.time()
+        cutoff = now - self.window_seconds
+        recent = [v for (t, v) in self.value_buffer[field_name] if t >= cutoff]
+        return sum(recent) / len(recent) if recent else None
+
+    def get_data(self, field_name: str = None):
+        if field_name is not None:
+            return self.latest_values.get(field_name)
+        return dict(self.latest_values)
+
+    # -------------------------------------------------------------------------
+    # ESCALATION
+    # -------------------------------------------------------------------------
+
     def _escalate(self, topic: str, reason: str):
-        """Final plan: report to the user/log. No more fallbacks below this."""
-        print(f"[Plan C - ESCALATE] Topic '{topic}': {reason}. "
-              f"This part of the system is not working.")
-        ### fill in: optionally publish this to an alert topic, e.g.
-        ### self.client.publish("NDATA/digital-twin-main/alert", json.dumps({...}))
+        label = TOPIC_LABEL.get(topic, topic)
+        print(f"[ERROR] [{label}] {reason}")
+        ### fill in: publish to an alert topic if needed
+
+    # -------------------------------------------------------------------------
+    # START
+    # -------------------------------------------------------------------------
 
     def start(self):
         self.client.loop_forever()
-        # This hands control over to the library. Internally (inside paho-mqtt's own code, which you never see or 
-        # write), it's doing something conceptually like this:
-        # This is INSIDE the library's source code — not your script
-        # while True:
-        #     raw_bytes = socket.read()                  # read raw network data
-        #     msg = MQTTMessage()                        # library builds the object
-        #     msg.topic = extracted_topic_string         # library fills in .topic
-        #     msg.payload = extracted_payload_bytes      # library fills in .payload
-        #     self.on_message(self, userdata, msg)        # library calls YOUR function, passing the object it built
-        # That MQTTMessage() line is the one you were searching for — and it genuinely is not in your script. It lives inside the installed paho-mqtt package on your computer.
-        """
-        my_obj = SomeClass()
-        where you see the object creation with your own eyes. But with callbacks (which is what on_message is), the library creates the 
-        object and hands it to you — you only ever receive it as a function parameter, you never type the line that builds it. This is 
-        genuinely one of the more confusing ideas in event-driven programming the first time you encounter it, so it's a good thing you 
-        pushed on this instead of accepting it at face value.
-        """
+
+
+# =============================================================================
+# TESTS -- run with: python pipeline_with_fallback.py
+# Tests the core logic without needing a broker or simulator.
+# =============================================================================
+
+def test_pipeline():
+    print("\n" + "=" * 60)
+    print("  PIPELINE TESTS")
+    print("=" * 60)
+
+    fallback = WeatherFallback(latitude=None, longitude=None)
+    pipeline = EnvironmentPipeline(
+        broker="", port=0,
+        weather_fallback=fallback,
+        window_seconds=60,
+        connect=False,
+    )
+
+    # TEST 1: Rolling average
+    print("\n--- TEST 1: Rolling average ---")
+    for val in [20.0, 22.0, 24.0]:
+        pipeline._record_good_value("temperature_c", val)
+    avg          = pipeline.get_average("temperature_c")
+    expected_avg = (20.0 + 22.0 + 24.0) / 3
+    print(f"  Average: {avg:.4f}, Expected: {expected_avg:.4f}")
+    print(f"  PASS: {abs(avg - expected_avg) < 0.001}")
+
+    # TEST 2: latest_values and last_raw_values both hold the exact last reading (not average)
+    print("\n--- TEST 2: latest_values holds exact last reading ---")
+    last_raw    = pipeline.last_known_fallback.get_last_value("temperature_c")
+    latest_val  = pipeline.latest_values.get("temperature_c")
+    avg_val     = pipeline.get_average("temperature_c")
+    print(f"  last_raw={last_raw}, latest={latest_val}, average={avg_val:.4f}")
+    print(f"  PASS: {last_raw == 24.0 and latest_val == 24.0 and abs(avg_val - 22.0) < 0.001}")
+
+    # TEST 3: Bad status triggers fallback -> escalation
+    print("\n--- TEST 3: Bad status escalates ---")
+    before = pipeline.latest_values.get("humidity_rel")
+    pipeline._run_fallback_chain(
+        topic="spBv1.0/cps/DDATA/p03-node/env_main",
+        field_name="humidity_rel",
+        value=75.0,
+        status="sensor_error",
+        valid_range=(0.0, 100.0),
+    )
+    after = pipeline.latest_values.get("humidity_rel")
+    print(f"  PASS (unchanged, fallback also failed): {before == after}")
+
+    # TEST 4: P07 location dict updates WeatherFallback
+    print("\n--- TEST 4: P07 location updates WeatherFallback ---")
+    pipeline._validate_object(
+        topic="spBv1.0/P07/NDATA/weather-pipeline",
+        field_name="location",
+        value={"name": "berlin", "latitude": 52.52, "longitude": 13.405},
+    )
+    print(f"  lat={fallback.latitude}, lng={fallback.longitude}")
+    print(f"  PASS: {fallback.latitude == 52.52 and fallback.longitude == 13.405}")
+
+    # TEST 5: Consecutive miss counter
+    print("\n--- TEST 5: Consecutive misses ---")
+    pipeline._record_good_value("calibrated", 0.55)
+    for _ in range(7):
+        pipeline._run_fallback_chain(
+            topic="spBv1.0/P01/DDATA/sensor-main/soil_moisture",
+            field_name="calibrated",
+            value=None,
+            status="sensor_disconnected",
+            valid_range=(0.0, 1.0),
+        )
+    misses = pipeline.consecutive_misses.get("calibrated", 0)
+    print(f"  Misses: {misses}, PASS: {misses == 7}")
+
+    # TEST 6: get_data() returns a safe copy
+    print("\n--- TEST 6: get_data() is a copy ---")
+    snapshot = pipeline.get_data()
+    snapshot["temperature_c"] = 9999
+    actual = pipeline.latest_values.get("temperature_c")
+    print(f"  PASS: {actual != 9999}")
+
+    print("\n" + "=" * 60)
+    print("  TESTS COMPLETE")
+    print("=" * 60 + "\n")
+
+
+if __name__ == "__main__":
+    test_pipeline()
