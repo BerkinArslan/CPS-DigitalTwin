@@ -20,10 +20,11 @@ class EnvironmentSimulator:
     # Each group owns one topic. We store them here so if a topic changes
     # we only update one place, not every method that uses it.
     TOPICS = {
-        "p03": "spBv1.0/cps/DDATA/p03-node/env_main",
-        "p01": "spBv1.0/P01/DDATA/sensor-main/soil_moisture",
-        "p07": "spBv1.0/P07/NDATA/weather-pipeline",
-    }
+    "p03_bme280": "cps/p03/DDATA/sensor-main/humidity-pressure-and-temperature",
+    "p03_light":  "cps/p03/DDATA/sensor-main/ambient-light",
+    "p01":        "cps/p01/DDATA/sensor-main/soil_moisture",
+    "p07":        "cps/p07/DDATA/weather-pipeline",
+}
 
     def __init__(self, broker: str, port: int, interval: int = 5):
         self.interval = interval
@@ -62,39 +63,45 @@ class EnvironmentSimulator:
     # ------------------------------------------------------------------
     # P03 -- Environmental sensor (temperature, humidity, pressure, light)
     # ------------------------------------------------------------------
-    def publish_p03(self):
-        """
-        P03 sends all four sensor readings in one combined message.
-        Previously they used three separate topics; the new spec merges them.
-        When status is not "ok", we set the numeric values to None because
-        a bad sensor reading should not be trusted by the pipeline at all --
-        sending None forces the pipeline to use its fallback chain.
-        """
+    def publish_p03_bme280(self):
         status = self._random_status(["sensor_error", "out_of_range", "stale"])
 
         if status == "ok":
             temperature_c = round(random.uniform(-40.0, 85.0), 1)
             humidity_rel  = round(random.uniform(0.0, 100.0), 1)
             pressure_hpa  = round(random.uniform(300.0, 1100.0), 1)
-            light_lux     = round(random.uniform(0.0, 65535.0), 1)
         else:
-            # All readings are unreliable when the sensor reports a bad status.
             temperature_c = None
             humidity_rel  = None
             pressure_hpa  = None
-            light_lux     = None
 
         payload = {
             "timestamp":     self._now(),
             "temperature_c": temperature_c,
             "humidity_rel":  humidity_rel,
             "pressure_hpa":  pressure_hpa,
-            "light_lux":     light_lux,
             "status":        status,
         }
 
-        self.client.publish(self.TOPICS["p03"], json.dumps(payload))
-        print(f"[Sim P03] {payload}")
+        self.client.publish(self.TOPICS["p03_bme280"], json.dumps(payload))
+        print(f"[Sim P03 BME280] {payload}")
+
+    def publish_p03_light(self):
+        status = self._random_status(["sensor_error", "out_of_range", "stale"])
+
+        if status == "ok":
+            light_lux = round(random.uniform(0.0, 65535.0), 1)
+        else:
+            light_lux = None
+
+        payload = {
+            "timestamp": self._now(),
+            "light_lux": light_lux,
+            "status":    status,
+        }
+
+        self.client.publish(self.TOPICS["p03_light"], json.dumps(payload))
+        print(f"[Sim P03 Light] {payload}")
 
     # ------------------------------------------------------------------
     # P01 -- Soil moisture sensor
@@ -202,19 +209,18 @@ class EnvironmentSimulator:
         }
 
         payload = {
-            "generated_at":     self._now(),
-            "data_source":      "open-meteo",
-            "location":         location,
-            "forecast_hours":   forecast_hours,
-            "daily_et_summary": daily_et_summary,
-            "staleness":        staleness,
-            "status":           status,
+            "weather/data_source":      "open-meteo",
+            "weather/location":         json.dumps(location),
+            "weather/forecast_hours":   json.dumps(forecast_hours),
+            "weather/daily_et_summary": json.dumps(daily_et_summary),
+            "weather/staleness":        json.dumps(staleness),
+            "weather/status":           status,
         }
 
         # Only include "message" when status is unavailable -- the spec says
         # this field is absent in live/cached messages.
         if status == "unavailable":
-            payload["message"] = "Simulated unavailable: cache too old or missing."
+            payload["weather/message"] = "Simulated unavailable: cache too old or missing."
 
         et0_values = [d["et0_mm"] for d in daily_et_summary]
         print(f"[Sim P07] status={status}, et0={et0_values}")
@@ -232,7 +238,8 @@ class EnvironmentSimulator:
         """
         print("[Sim] Starting publish loop. Ctrl+C to stop.")
         while True:
-            self.publish_p03()
+            self.publish_p03_bme280()
+            self.publish_p03_light()
             self.publish_p01()
             self.publish_p07()
             time.sleep(self.interval)

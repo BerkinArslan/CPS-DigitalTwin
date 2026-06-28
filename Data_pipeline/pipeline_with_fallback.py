@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import time
+import threading
 import requests
 import paho.mqtt.client as mqtt
 
@@ -21,21 +22,27 @@ import paho.mqtt.client as mqtt
 # humidity_rel was previously called humidity_pct.
 # light_lux max corrected to 65535 (BH1750 hardware limit).
 # sensor_error replaces sensor_disconnected in their status enum.
+
 ENVIRONMENT_SCHEMA = {
-    "spBv1.0/cps/DDATA/p03-node/env_main": {
+    "cps/p03/DDATA/sensor-main/humidity-pressure-and-temperature": {
         "timestamp":     {"type": "string"},
         "temperature_c": {"type": "range", "valid_range": (-40.0, 85.0)},
         "humidity_rel":  {"type": "range", "valid_range": (0.0, 100.0)},
         "pressure_hpa":  {"type": "range", "valid_range": (300.0, 1100.0)},
-        "light_lux":     {"type": "range", "valid_range": (0.0, 65535.0)},
         "status":        {"type": "enum",
                           "valid_values": ["ok", "sensor_error", "out_of_range", "stale"]},
+    },
+    "cps/p03/DDATA/sensor-main/ambient-light": {
+        "timestamp":  {"type": "string"},
+        "light_lux":  {"type": "range", "valid_range": (0.0, 65535.0)},
+        "status":     {"type": "enum",
+                       "valid_values": ["ok", "sensor_error", "out_of_range", "stale"]},
     },
 }
 
 
 SOIL_MOISTURE_SCHEMA = {
-    "spBv1.0/P01/DDATA/sensor-main/soil_moisture": {
+    "cps/p01/DDATA/sensor-main/soil_moisture": {
         "timestamp":  {"type": "string"},
         "calibrated": {"type": "range", "valid_range": (0.0, 1.0)},
         "raw_adc":    {"type": "range", "valid_range": (0, 65536)},
@@ -49,16 +56,15 @@ SOIL_MOISTURE_SCHEMA = {
 # daily_et_summary are real lists. No second json.loads() needed.
 # Always check status first -- if "unavailable", arrays are empty.
 WEATHER_API_SCHEMA = {
-    "spBv1.0/P07/NDATA/weather-pipeline": {
-        "generated_at":     {"type": "string"},
-        "data_source":      {"type": "enum",   "valid_values": ["open-meteo"]},
-        "location":         {"type": "object"},  # {"name", "latitude", "longitude"}
-        "forecast_hours":   {"type": "array"},   # list of hourly dicts, up to 48
-        "daily_et_summary": {"type": "array"},   # list of daily dicts
-        "staleness":        {"type": "object"},  # {"is_cached", "fetched_at", "hours_old"}
-        "status":           {"type": "enum",
-                             "valid_values": ["live", "cached", "unavailable"]},
-        "message":          {"type": "string"},  # only present when status=unavailable
+    "cps/p07/DDATA/weather-pipeline": {
+        "weather/data_source":      {"type": "enum",   "valid_values": ["open-meteo"]},
+        "weather/location":         {"type": "object"},
+        "weather/forecast_hours":   {"type": "array"},
+        "weather/daily_et_summary": {"type": "array"},
+        "weather/staleness":        {"type": "object"},
+        "weather/status":           {"type": "enum",
+                                     "valid_values": ["live", "cached", "unavailable"]},
+        "weather/message":          {"type": "string"},
     },
 }
 
@@ -70,9 +76,10 @@ SCHEMA = {
 
 # Short readable label for each topic, used in terminal output.
 TOPIC_LABEL = {
-    "spBv1.0/cps/DDATA/p03-node/env_main":        "P03",
-    "spBv1.0/P01/DDATA/sensor-main/soil_moisture": "P01",
-    "spBv1.0/P07/NDATA/weather-pipeline":          "P07",
+    "cps/p03/DDATA/sensor-main/humidity-pressure-and-temperature": "P03",
+    "cps/p03/DDATA/sensor-main/ambient-light":                     "P03",
+    "cps/p01/DDATA/sensor-main/soil_moisture":                     "P01",
+    "cps/p07/DDATA/weather-pipeline":                              "P07",
 }
 
 # Status values from P01/P03/P07 that mean "do not trust this reading".
@@ -179,9 +186,12 @@ class EnvironmentPipeline:
     }
 
     def __init__(self, broker: str, port: int, weather_fallback: WeatherFallback,
-                 window_seconds: float = 300, connect: bool = True):
+                 window_seconds: float = 300, connect: bool = True, on_new_reading=None, interval_seconds : int = 30):
         self.weather_fallback  = weather_fallback
         self.window_seconds    = window_seconds
+        self.on_new_reading    = on_new_reading #stores the callback function the user passes in. If they don't pass one, it stays None and we simply never call it.
+        self.interval_seconds  = interval_seconds #stores how often the heartbeat should fire. Default is 30 seconds.
+        self._heartbeat_timer  = None #will hold the timer object once the heartbeat starts. We set it to None for now because the timer hasn't started yet.
 
         self.value_buffer    = {}  # field -> [(timestamp, value), ...]
         self.last_raw_values = {}  # field -> exact last trusted reading
@@ -251,22 +261,29 @@ class EnvironmentPipeline:
         except json.JSONDecodeError:
             self._escalate(topic, "malformed JSON payload") #Escalate is the method at the very bottom that immediately takes Fallback C
             return
-
+        
         # P07 uses status to signal data freshness, not sensor health.
         # If unavailable, arrays are empty, nothing useful to process.
 
-        if topic == "spBv1.0/P07/NDATA/weather-pipeline":
-            if data.get("status") == "unavailable":
-                self._escalate(topic, f"P07 unavailable: {data.get('message', '(no reason)')}")
+        if topic == "cps/p07/DDATA/weather-pipeline":
+            for nested_field in ["weather/location", "weather/staleness", "weather/forecast_hours", "weather/daily_et_summary"]: #For nested_field = "weather/location", this gives us: raw = '{"name": "berlin", "latitude": 52.52, "longitude": 13.405}'
+                raw = data.get(nested_field)
+                if isinstance(raw, str): #json.dumps() is the opposite of json.loads(). It takes a Python dict and turns it into a string. So weather/location inside the payload is not the dict itself — it is a text representation of the dict, wrapped in quotes.
+                    try:
+                        data[nested_field] = json.loads(raw)
+                    except json.JSONDecodeError:
+                        self._escalate(topic, f"{nested_field} contained invalid JSON string")
+                        return
+
                 # P07 sends "message" only when status is "unavailable", explaining why
                 # (e.g. "Cache too old: 26.3 hours"). The '(no reason)' default is a safety
                 # net so our escalation log is never blank if the key is missing.
-                return
+                
 
         status = data.get("status") # status = "ok"
 
         for field_name, rules in field_definitions.items(): # For Calibrated, "type": "range", "valid_range": (0.0, 1.0) in "calibrated": {"type": "range", "valid_range": (0.0, 1.0)""
-            if field_name == "status" and topic != "spBv1.0/P07/NDATA/weather-pipeline":
+            if field_name == "status" and topic != "cps/p07/DDATA/weather-pipeline":
                 continue
             value = data.get(field_name) # 0.53 = data.get(Calibrated)
             self._process_field(topic, field_name, value, status, rules) #(topic= spBv1.0/P01/DDATA/sensor-main/soil_moisture, field name= Calibrated, value= 0.53, status = ok, rules = {"type": "range", "valid_range": (0.0, 1.0)} )
@@ -283,6 +300,9 @@ class EnvironmentPipeline:
         if numeric_fields:
             summary = "  ".join(f"{k}={v}" for k, v in numeric_fields.items())
             print(f"[{label}] status={status}  {summary}")
+
+        if self.on_new_reading is not None:
+            self.on_new_reading(self.get_data())
 
     # -------------------------------------------------------------------------
     # FIELD ROUTING
@@ -303,6 +323,7 @@ class EnvironmentPipeline:
             self._validate_array(topic, field_name, value)  # value = [{"time": "...", "temperature_c": 21.5, ...}, ...]
         else:
             print(f"[Pipeline] Unknown field type '{field_type}' for {field_name}")
+
 
     # -------------------------------------------------------------------------
     # VALIDATION METHODS
@@ -394,7 +415,7 @@ class EnvironmentPipeline:
                 print(f"[WARNING] {field_name}: {miss_count} consecutive misses, exceeded limit.")
 
         if fallback_value is not None:
-            self.latest_values[field_name] = fallback_value
+            self._record_good_value(field_name, fallback_value)
             return
 
         # Plan C: nothing worked.
@@ -483,9 +504,27 @@ class EnvironmentPipeline:
     # -------------------------------------------------------------------------
     # START
     # -------------------------------------------------------------------------
+    def _schedule_heartbeat(self):
+        self._heartbeat_timer = threading.Timer(self.interval_seconds, self._heartbeat_trick)
+        self._heartbeat_timer.daemon = True
+        self._heartbeat_timer.start()
 
+    def _heartbeat_trick(self):
+        if self.on_new_reading is not None:
+            self.on_new_reading(self.get_data())
+        self._schedule_heartbeat()
+
+    
     def start(self):
-        self.client.loop_forever()
+        self.client.loop_start()
+        self._schedule_heartbeat()
+
+    def stop(self):
+        if self._heartbeat_timer is not None:
+            self._heartbeat_timer.cancel()
+        self.client.loop_stop()
+        self.client.disconnect()
+        print("[Pipeline] Stopped")
 
 
 # =============================================================================
@@ -527,7 +566,7 @@ def test_pipeline():
     print("\n--- TEST 3: Bad status escalates ---")
     before = pipeline.latest_values.get("humidity_rel")
     pipeline._run_fallback_chain(
-        topic="spBv1.0/cps/DDATA/p03-node/env_main",
+        topic="cps/p03/DDATA/sensor-main/humidity-pressure-and-temperature",
         field_name="humidity_rel",
         value=75.0,
         status="sensor_error",
@@ -539,7 +578,7 @@ def test_pipeline():
     # TEST 4: P07 location dict updates WeatherFallback
     print("\n--- TEST 4: P07 location updates WeatherFallback ---")
     pipeline._validate_object(
-        topic="spBv1.0/P07/NDATA/weather-pipeline",
+        topic="cps/p07/DDATA/weather-pipeline",
         field_name="location",
         value={"name": "berlin", "latitude": 52.52, "longitude": 13.405},
     )
@@ -551,7 +590,7 @@ def test_pipeline():
     pipeline._record_good_value("calibrated", 0.55)
     for _ in range(7):
         pipeline._run_fallback_chain(
-            topic="spBv1.0/P01/DDATA/sensor-main/soil_moisture",
+            topic="cps/p01/DDATA/sensor-main/soil_moisture",
             field_name="calibrated",
             value=None,
             status="sensor_disconnected",
