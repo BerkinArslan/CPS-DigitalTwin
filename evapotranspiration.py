@@ -5,6 +5,8 @@
 import math
 import numpy as np
 
+#TODO:
+# name of the function is wrong, needs changing!
 def water_volume_loss_to_evaporation(
         et_crop: float,
         pot_area: float

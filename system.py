@@ -602,6 +602,8 @@ class IrrigationSystem:
                                            irradiation: float,
                                            soil_albedo: float,
                                            soil_absorption_ratio: float,
+                                           crop_coefficient: float = 1,
+                                           balcony_mc_coefficient: float = 0.75,
                                            evaporation_efficiency: float = 0.45
                                            ):
         """
@@ -630,11 +632,11 @@ class IrrigationSystem:
             )
 
             pot_et = crop_evapotranspiration(ref_et,
-                                             crop_coefficient=1,
-                                             balcony_microclimate_correction=0.7)
+                                             crop_coefficient=crop_coefficient,
+                                             balcony_microclimate_correction=balcony_mc_coefficient)
 
             water_loss = water_volume_loss_to_evaporation(pot_et,
-                                                          pot_area=0.08)
+                                                          pot_area=self.nodes[pot_name].pot_area)
 
             water_loss = water_loss / divider
             print(f'water_loss: {water_loss}')
