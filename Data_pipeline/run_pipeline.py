@@ -1,5 +1,5 @@
 import time
-from pipeline_with_fallback import EnvironmentPipeline, WeatherFallback
+from Data_pipeline.pipeline_with_fallback import EnvironmentPipeline, WeatherFallback
 
 # Placeholder coordinates used ONLY before the first P07 message arrives.
 # P07 overwrites these automatically when it sends its first location field.

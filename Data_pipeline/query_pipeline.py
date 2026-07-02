@@ -27,10 +27,10 @@ import os
 # We import the pipeline class and fallback class from our main file.
 # This is exactly like doing "import numpy as np" -- we are just
 # importing tools someone else already built.
-from pipeline_with_fallback import EnvironmentPipeline, WeatherFallback
+from Data_pipeline.pipeline_with_fallback import EnvironmentPipeline, WeatherFallback
 
 # We import helper functions from read_sensor_log.py for CSV queries.
-from read_sensor_log import load_log, get_field, get_values, summary
+from Data_pipeline.read_sensor_log import load_log, get_field, get_values, summary
 
 
 # =============================================================================
