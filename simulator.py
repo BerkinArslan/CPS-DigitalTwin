@@ -1,12 +1,12 @@
 from evapotranspiration import water_volume_loss_to_evaporation
 from system import IrrigationSystem
 from nodes import Pot
+from Data_pipeline.pipeline_with_fallback import EnvironmentPipeline, WeatherFallback
 
 class Simulation:
 
     def __init__(self,
                  system: IrrigationSystem,
-                 pot_area: float,
                  crop_coefficient: float = 1,
                  balcony_mc_coefficient: float = 0.75,
                  evaporation_efficiency: float = 0.45,):
@@ -14,7 +14,6 @@ class Simulation:
         self.crop_coefficient = crop_coefficient
         self.balcony_mc_coefficient = balcony_mc_coefficient
         self.evaporation_efficiency = evaporation_efficiency
-        self.pot_area = pot_area
 
     def step_advanced(self,
              step_time: float,
@@ -72,3 +71,24 @@ class Simulation:
             water_volume_loss = water_volume_loss_to_evaporation(et, pot.pot_area)
             pot.water_volume = pot.water_volume - water_volume_loss
             pot.update_moisture()
+
+class Auto_Predict_Simulator(Simulation):
+
+    def __init__(self,
+                 data_pipeline: EnvironmentPipeline,
+                 data_fallback: WeatherFallback,
+                 system: IrrigationSystem,
+                 crop_coefficient: float = 1,
+                 balcony_mc_coefficient: float = 0.75,
+                 evaporation_efficiency: float = 0.45,):
+        super().__init__(system,
+                         crop_coefficient,
+                         balcony_mc_coefficient,
+                         evaporation_efficiency)
+
+        self.data_pipeline = data_pipeline
+        self.data_fallback = data_fallback
+        #TODO:
+        # make this connect ot the MQTT and make prediction automatically
+        # decide on averaging window or last value
+

@@ -638,7 +638,7 @@ class IrrigationSystem:
             water_loss = water_volume_loss_to_evaporation(pot_et,
                                                           pot_area=self.nodes[pot_name].pot_area)
 
-            water_loss = water_loss / divider
+            water_loss = water_loss * divider
             print(f'water_loss: {water_loss}')
 
             self.nodes[pot_name].water_volume = self.nodes[pot_name].water_volume - water_loss
@@ -697,7 +697,7 @@ if __name__ == '__main__':
         coordinates = (10, 20),
         elevation = 10,
         soil_volume = 10,
-        max_moisture = 100,
+        max_moisture = 1,
         min_moisture = 0,
         initial_moisture = 0.54,
     )
@@ -731,7 +731,7 @@ if __name__ == '__main__':
         coordinates = (30, 20),
         elevation = 10,
         soil_volume = 10,
-        max_moisture = 100,
+        max_moisture = 1,
         min_moisture = 0,
         initial_moisture = 0.74,
     )
@@ -765,7 +765,7 @@ if __name__ == '__main__':
         coordinates=(30, 10),
         elevation=10,
         soil_volume=10,
-        max_moisture=100,
+        max_moisture=1,
         min_moisture=0,
         initial_moisture=0.38,
     )
@@ -784,7 +784,7 @@ if __name__ == '__main__':
         coordinates=(20, 5),
         elevation=10,
         soil_volume=10,
-        max_moisture=100,
+        max_moisture=1,
         min_moisture=0,
         initial_moisture=0.67,
     )
