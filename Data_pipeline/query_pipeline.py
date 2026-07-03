@@ -45,12 +45,25 @@ from pipeline_with_fallback import EnvironmentPipeline, WeatherFallback
 # last-known), status will be something else and the block is skipped.
 # =============================================================================
 
+#
+##
+###
+####
+##### How Berkin can use this even driven data from Sensor. 
 def on_new_reading(snapshot, status):
     if status in ("ok", "live"):
         temp = snapshot.get("temperature_c")
         if temp is not None:
             temp_f = round(temp * 9 / 5 + 32, 1)
             print(f"[Event] Sensor ok — temperature = {temp} °C  /  {temp_f} °F")
+#####
+####
+###
+##
+#
+
+
+
 
 # We import helper functions from read_sensor_log.py for CSV queries.
 from read_sensor_log import load_log, get_field, get_values, summary
