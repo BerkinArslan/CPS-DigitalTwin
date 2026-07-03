@@ -15,11 +15,16 @@ PORT              = 1883
 # heartbeat. snapshot is a copy of latest_values at that moment.
 # Replace the print statement here with whatever your digital twin needs.
 # =============================================================================
-def on_new_reading(snapshot):
+def on_new_reading(snapshot, status):
     temp     = snapshot.get("temperature_c")
     humidity = snapshot.get("humidity_rel")
     moisture = snapshot.get("calibrated")
     print(f"[Twin] temp={temp}  humidity={humidity}  soil={moisture}")
+
+    if status in ("ok", "live"):
+        if temp is not None:
+            temp_f = round(temp * 9 / 5 + 32, 1)
+            print(f"[Twin] Sensor confirmed ok — temperature = {temp_f} °F")
 
 if __name__ == "__main__":
     weather_fallback = WeatherFallback(

@@ -29,6 +29,42 @@ import os
 # importing tools someone else already built.
 from pipeline_with_fallback import EnvironmentPipeline, WeatherFallback
 
+
+# =============================================================================
+# EVENT-DRIVEN CALLBACK
+#
+# on_new_reading is called automatically by the pipeline on every MQTT message.
+# The pipeline passes two things:
+#   snapshot  — dict of all latest trusted values at this moment
+#   status    — the status string that arrived with THIS message
+#               e.g. "ok", "sensor_error", "out_of_range", "stale"
+#               None on heartbeat ticks (no incoming message)
+#
+# The if status == "ok" block only runs when the data came directly from
+# the real sensor (Plan A). If the pipeline used a fallback (OpenMeteo,
+# last-known), status will be something else and the block is skipped.
+# =============================================================================
+
+#
+##
+###
+####
+##### How Berkin can use this even driven data from Sensor. 
+def on_new_reading(snapshot, status):
+    if status in ("ok", "live"):
+        temp = snapshot.get("temperature_c")
+        if temp is not None:
+            temp_f = round(temp * 9 / 5 + 32, 1)
+            print(f"[Event] Sensor ok — temperature = {temp} °C  /  {temp_f} °F")
+#####
+####
+###
+##
+#
+
+
+
+
 # We import helper functions from read_sensor_log.py for CSV queries.
 from read_sensor_log import load_log, get_field, get_values, summary
 
@@ -70,6 +106,7 @@ pipeline = EnvironmentPipeline(
     port=PORT,
     weather_fallback=weather_fallback,
     window_seconds=WINDOW_SECONDS,
+    on_new_reading=on_new_reading,
 )
 
 # start() is non-blocking — it launches the MQTT listener on a background
@@ -113,7 +150,7 @@ pressure = pipeline.get_data("pressure_hpa")
 print(f"[P03] pressure_hpa   = {pressure} hPa")
 
 # light_lux: ambient light intensity (0 to 65535)
-# No fallback exists for this field — if sensor fails, value stays as last known.
+# Fallback: OpenMeteo shortwave_radiation × 120 → lux approximation.
 light = pipeline.get_data("light_lux")
 print(f"[P03] light_lux      = {light} lux")
 
@@ -125,6 +162,12 @@ print(f"\n[P01] calibrated     = {soil}  (0.0=dry, 1.0=saturated)")
 # raw_adc: raw hardware reading before calibration (0 to 65535)
 raw = pipeline.get_data("raw_adc")
 print(f"[P01] raw_adc        = {raw}")
+
+# wind_speed: wind speed at 2 m height in km/h (published by P07 on the same topic).
+# Fallback: OpenMeteo wind_speed_10m converted to 2 m using the wind power law.
+# If P07 has not configured this field yet, returns None until they start publishing.
+wind = pipeline.get_data("wind_speed")
+print(f"\n[P07] wind_speed     = {wind} km/h  (at 2 m height)")
 
 # --- P07: Weather API ---
 # weather/status: tells you if the forecast is fresh, cached, or unavailable
@@ -171,6 +214,10 @@ print(f"[P03] humidity_rel   5min average = {avg_humidity} %")
 avg_pressure = pipeline.get_average("pressure_hpa")
 print(f"[P03] pressure_hpa   5min average = {avg_pressure} hPa")
 
+# 5 minute rolling average for wind speed
+avg_wind = pipeline.get_average("wind_speed")
+print(f"[P07] wind_speed     5min average = {avg_wind} km/h")
+
 # 5 minute rolling average for soil moisture
 avg_soil = pipeline.get_average("calibrated")
 print(f"[P01] calibrated     5min average = {avg_soil}")
@@ -212,7 +259,7 @@ else:
     # summary() prints mean, min, max, std dev for a field over the given rows.
     print("\n--- Statistical summary for each field ---")
     fields = ["temperature_c", "humidity_rel", "pressure_hpa",
-              "light_lux", "calibrated", "raw_adc"]
+              "light_lux", "wind_speed", "calibrated", "raw_adc"]
     for field in fields:
         values = get_values(all_rows, field)
         if values:
@@ -226,6 +273,15 @@ else:
     temp_rows = get_field(all_rows, "temperature_c")
     for row in temp_rows[-10:]:
         print(f"  {row['timestamp_utc']}  temperature_c = {row['value']} °C")
+
+    # --- Last 10 readings for wind speed ---
+    print("\n--- Last 10 wind_speed readings ---")
+    wind_rows = get_field(all_rows, "wind_speed")
+    if wind_rows:
+        for row in wind_rows[-10:]:
+            print(f"  {row['timestamp_utc']}  wind_speed = {row['value']} km/h")
+    else:
+        print("  No wind_speed data yet — P07 has not published this field.")
 
     # --- Last 10 readings for soil moisture ---
     print("\n--- Last 10 calibrated (soil moisture) readings ---")
