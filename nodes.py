@@ -70,7 +70,8 @@ class Pot(Node):
                  soil_volume: float,
                  max_moisture: float,
                  min_moisture: float,
-                 initial_moisture: float,):
+                 initial_moisture: float,
+                 pot_area: float = 0.08):
         """
         Creates a new pot object
         :param name: Name of the pot
@@ -87,6 +88,7 @@ class Pot(Node):
         self.max_moisture = max_moisture
         self.min_moisture = min_moisture
         self.initial_moisture = initial_moisture
+        self.pot_area = pot_area
 
         #Dynamic simulation states
         self.moisture = initial_moisture

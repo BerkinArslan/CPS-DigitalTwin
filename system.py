@@ -602,6 +602,8 @@ class IrrigationSystem:
                                            irradiation: float,
                                            soil_albedo: float,
                                            soil_absorption_ratio: float,
+                                           crop_coefficient: float = 1,
+                                           balcony_mc_coefficient: float = 0.75,
                                            evaporation_efficiency: float = 0.45
                                            ):
         """
@@ -630,13 +632,13 @@ class IrrigationSystem:
             )
 
             pot_et = crop_evapotranspiration(ref_et,
-                                             crop_coefficient=1,
-                                             balcony_microclimate_correction=0.7)
+                                             crop_coefficient=crop_coefficient,
+                                             balcony_microclimate_correction=balcony_mc_coefficient)
 
             water_loss = water_volume_loss_to_evaporation(pot_et,
-                                                          pot_area=0.08)
+                                                          pot_area=self.nodes[pot_name].pot_area)
 
-            water_loss = water_loss / divider
+            water_loss = water_loss * divider
             print(f'water_loss: {water_loss}')
 
             self.nodes[pot_name].water_volume = self.nodes[pot_name].water_volume - water_loss
@@ -695,7 +697,7 @@ if __name__ == '__main__':
         coordinates = (10, 20),
         elevation = 10,
         soil_volume = 10,
-        max_moisture = 100,
+        max_moisture = 1,
         min_moisture = 0,
         initial_moisture = 0.54,
     )
@@ -729,7 +731,7 @@ if __name__ == '__main__':
         coordinates = (30, 20),
         elevation = 10,
         soil_volume = 10,
-        max_moisture = 100,
+        max_moisture = 1,
         min_moisture = 0,
         initial_moisture = 0.74,
     )
@@ -763,7 +765,7 @@ if __name__ == '__main__':
         coordinates=(30, 10),
         elevation=10,
         soil_volume=10,
-        max_moisture=100,
+        max_moisture=1,
         min_moisture=0,
         initial_moisture=0.38,
     )
@@ -782,7 +784,7 @@ if __name__ == '__main__':
         coordinates=(20, 5),
         elevation=10,
         soil_volume=10,
-        max_moisture=100,
+        max_moisture=1,
         min_moisture=0,
         initial_moisture=0.67,
     )
