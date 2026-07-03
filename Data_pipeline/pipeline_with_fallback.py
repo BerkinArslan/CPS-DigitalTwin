@@ -23,7 +23,7 @@ import paho.mqtt.client as mqtt
 # light_lux max corrected to 65535 (BH1750 hardware limit).
 # sensor_error replaces sensor_disconnected in their status enum.
 
-ENVIRONMENT_SCHEMA = {
+ENVIRONMENT_SCHEMA = { #P3
     "cps/p03/DDATA/sensor-main/humidity-pressure-and-temperature": {
         "timestamp":     {"type": "string"},
         "temperature_c": {"type": "range", "valid_range": (-40.0, 85.0)},
@@ -41,7 +41,7 @@ ENVIRONMENT_SCHEMA = {
 }
 
 
-SOIL_MOISTURE_SCHEMA = {
+SOIL_MOISTURE_SCHEMA = { #P1
     "cps/p01/DDATA/sensor-main/soil_moisture": {
         "timestamp":  {"type": "string"},
         "calibrated": {"type": "range", "valid_range": (0.0, 1.0)},
@@ -55,7 +55,7 @@ SOIL_MOISTURE_SCHEMA = {
 # P07: location and staleness are real nested dicts; forecast_hours and
 # daily_et_summary are real lists. No second json.loads() needed.
 # Always check status first -- if "unavailable", arrays are empty.
-WEATHER_API_SCHEMA = {
+WEATHER_API_SCHEMA = { #P7
     "cps/p07/DDATA/weather-pipeline": {
         "weather/data_source":      {"type": "enum",   "valid_values": ["open-meteo"]},
         "weather/location":         {"type": "object"},
@@ -65,6 +65,9 @@ WEATHER_API_SCHEMA = {
         "weather/status":           {"type": "enum",
                                      "valid_values": ["live", "cached", "unavailable"]},
         "weather/message":          {"type": "string"},
+        # P07 will publish wind_speed on the same topic once they configure it.
+        # Field added here so the pipeline accepts and validates it when it arrives.
+        "wind_speed":               {"type": "range", "valid_range": (0.0, 150.0)},
     },
 }
 
@@ -84,7 +87,7 @@ TOPIC_LABEL = {
 
 # Status values from P01/P03/P07 that mean "do not trust this reading".
 # P07 uses different vocabulary (live/cached/unavailable), handled separately.
-BAD_STATUSES = {"sensor_disconnected", "sensor_error", "out_of_range", "stale"}
+BAD_STATUSES = {"sensor_disconnected", "sensor_error", "out_of_range", "stale", "unavailable"}
 
 # Maximum hours of sensor history to keep in the CSV log.
 # When this limit is exceeded, the old file is deleted and a new one starts.
@@ -149,11 +152,94 @@ class WeatherFallback:
         try:
             params = {"latitude": self.latitude, "longitude": self.longitude,
                       "current": "surface_pressure"}
-            response = requests.get(self.url, params= params, timeout=5 ) #A timeout defines how long a program will wait for a server’s response before aborting the connection. It ensures your code doesn’t get stuck when the server is too slow or unreachable.
+            response = requests.get(self.url, params=params, timeout=5)
             response.raise_for_status()
             return response.json()["current"]["surface_pressure"]
         except (requests.RequestException, KeyError, ValueError) as e:
-            print(f"[Fallback] OpenMeteo humidity failed: {e}")
+            print(f"[Fallback] OpenMeteo pressure failed: {e}")
+            return None
+
+    def get_wind_speed(self):
+        # OpenMeteo only provides wind speed at 10 m height — the standard
+        # meteorological measurement height. We need 2 m (balcony level), so
+        # we convert using the Wind Power Law:
+        #
+        #   v(z) = v(z_ref) × (z / z_ref) ^ α
+        #
+        # where:
+        #   v(z)     = wind speed at our target height (2 m)
+        #   v(z_ref) = wind speed at the reference height (10 m) from OpenMeteo
+        #   z        = target height in metres = 2
+        #   z_ref    = reference height in metres = 10
+        #   α        = wind shear exponent — depends on terrain roughness:
+        #                0.14  open flat land (fields, sea)
+        #                0.25  suburban / urban (our case: Berlin balcony)
+        #                0.40  dense city centre with tall buildings
+        #
+        # For a Berlin balcony α = 0.25 is a reasonable estimate.
+        # (2 / 10) ^ 0.25 = 0.2 ^ 0.25 ≈ 0.669
+        # So 2 m wind speed is roughly 67 % of the 10 m reading.
+        #
+        # NOTE: this is still an approximation. A balcony is shielded by the
+        # building behind it and affected by neighbours — no formula captures
+        # that geometry. Treat this as a rough estimate until P07's anemometer
+        # provides the real 2 m value.
+        if not self._coords_ready():
+            print("[Fallback] Coordinates not yet known; skipping OpenMeteo call.")
+            return None
+        try:
+            params = {"latitude": self.latitude, "longitude": self.longitude,
+                      "current": "wind_speed_10m"}
+            response = requests.get(self.url, params=params, timeout=5)
+            response.raise_for_status()
+            wind_10m = response.json()["current"]["wind_speed_10m"]  # km/h at 10 m
+            alpha    = 0.25          # wind shear exponent for suburban/urban terrain
+            wind_2m  = wind_10m * (2 / 10) ** alpha  # power law downscale to 2 m
+            return round(wind_2m, 1)
+        except (requests.RequestException, KeyError, ValueError) as e:
+            print(f"[Fallback] OpenMeteo wind_speed failed: {e}")
+            return None
+
+    def get_light_lux(self):
+        # OpenMeteo provides shortwave solar radiation in W/m².
+        # Conversion: 1 W/m² ≈ 120 lux for natural daylight.
+        # This is an approximation — lux is photometric, radiation is radiometric.
+        if not self._coords_ready():
+            print("[Fallback] Coordinates not yet known; skipping OpenMeteo call.")
+            return None
+        try:
+            params = {"latitude": self.latitude, "longitude": self.longitude,
+                      "current": "shortwave_radiation"}
+            response = requests.get(self.url, params=params, timeout=5)
+            response.raise_for_status()
+            radiation = response.json()["current"]["shortwave_radiation"]  # W/m²
+            lux = round(radiation * 120, 1)
+            return min(lux, 65535.0)  # clamp to BH1750 sensor max
+        except (requests.RequestException, KeyError, ValueError) as e:
+            print(f"[Fallback] OpenMeteo light_lux failed: {e}")
+            return None
+
+    def get_soil_moisture(self):
+        # OpenMeteo hourly soil moisture (0–1 cm depth) in m³/m³.
+        # Typical range: 0.05 (dry) to 0.45 (saturated) — NOT the same unit as
+        # calibrated (0.0–1.0), but fits inside the valid range and is a reasonable
+        # approximation when the P01 sensor has been down for more than 5 readings.
+        if not self._coords_ready():
+            print("[Fallback] Coordinates not yet known; skipping OpenMeteo call.")
+            return None
+        try:
+            params = {"latitude": self.latitude, "longitude": self.longitude,
+                      "hourly": "soil_moisture_0_to_1cm",
+                      "forecast_days": 1}
+            response = requests.get(self.url, params=params, timeout=5)
+            response.raise_for_status()
+            hourly = response.json()["hourly"]
+            # Find the value for the current UTC hour.
+            current_hour = time.strftime("%Y-%m-%dT%H:00", time.gmtime())
+            idx = hourly["time"].index(current_hour)
+            return round(hourly["soil_moisture_0_to_1cm"][idx], 3)
+        except (requests.RequestException, KeyError, ValueError, IndexError) as e:
+            print(f"[Fallback] OpenMeteo soil_moisture failed: {e}")
             return None
 
 # =============================================================================
@@ -180,9 +266,10 @@ class EnvironmentPipeline:
         "temperature_c":  "weather",
         "humidity_rel":   "weather",
         "pressure_hpa":   "weather",
-        "light_lux":      "no_fallback",
-        "calibrated":     "last_known",
-        "raw_adc":        "no_fallback",
+        "wind_speed":     "weather",     # OpenMeteo wind_speed_10m (km/h)
+        "light_lux":      "weather",     # OpenMeteo shortwave_radiation × 120 → lux
+        "calibrated":     "last_known",  # last known for ≤5 misses, then OpenMeteo soil moisture
+        "raw_adc":        "no_fallback", # ADC is hardware-specific, no external source
     }
 
     def __init__(self, broker: str, port: int, weather_fallback: WeatherFallback,
@@ -190,7 +277,9 @@ class EnvironmentPipeline:
         self.weather_fallback  = weather_fallback
         self.window_seconds    = window_seconds
         self.on_new_reading    = on_new_reading #stores the callback function the user passes in. If they don't pass one, it stays None and we simply never call it.
+
         self.interval_seconds  = interval_seconds #stores how often the heartbeat should fire. Default is 30 seconds.
+        
         self._heartbeat_timer  = None #will hold the timer object once the heartbeat starts. We set it to None for now because the timer hasn't started yet.
 
         self.value_buffer    = {}  # field -> [(timestamp, value), ...]
@@ -280,7 +369,11 @@ class EnvironmentPipeline:
                 # net so our escalation log is never blank if the key is missing.
                 
 
-        status = data.get("status") # status = "ok"
+        # P07 uses "weather/status" instead of "status" — extract accordingly.
+        if topic == "cps/p07/DDATA/weather-pipeline":
+            status = data.get("weather/status")
+        else:
+            status = data.get("status")
 
         for field_name, rules in field_definitions.items(): # For Calibrated, "type": "range", "valid_range": (0.0, 1.0) in "calibrated": {"type": "range", "valid_range": (0.0, 1.0)""
             if field_name == "status" and topic != "cps/p07/DDATA/weather-pipeline":
@@ -302,7 +395,7 @@ class EnvironmentPipeline:
             print(f"[{label}] status={status}  {summary}")
 
         if self.on_new_reading is not None:
-            self.on_new_reading(self.get_data())
+            self.on_new_reading(self.get_data(), status)
 
     # -------------------------------------------------------------------------
     # FIELD ROUTING
@@ -382,7 +475,7 @@ class EnvironmentPipeline:
         if valid_range is not None and value is not None: #True
             in_range = valid_range[0] <= value <= valid_range[1]  # (0.0) <= 0.53 <= (1.0) → True
 
-        status_ok = (status is None) or (status not in BAD_STATUSES)  # "ok" not in BAD_STATUSES → True
+        status_ok = (status is None) or (status not in BAD_STATUSES) # "ok" not in BAD_STATUSES → True
 
         if status_ok and value is not None and in_range: # if True and True is True and True:
             self._record_good_value(field_name, value)  # stores exact value in latest_values, last_raw_values, and rolling buffer
@@ -400,6 +493,10 @@ class EnvironmentPipeline:
                 fallback_value = self.weather_fallback.get_humidity()
             elif field_name == "pressure_hpa":
                 fallback_value = self.weather_fallback.get_pressure()
+            elif field_name == "wind_speed":
+                fallback_value = self.weather_fallback.get_wind_speed()
+            elif field_name == "light_lux":
+                fallback_value = self.weather_fallback.get_light_lux()
             if fallback_value is not None:
                 print(f"[WARNING] {field_name}: sensor status='{status}', using OpenMeteo fallback = {fallback_value}")
 
@@ -413,6 +510,11 @@ class EnvironmentPipeline:
                 print(f"[WARNING] {field_name}: sensor status='{status}', miss #{miss_count}/{self.MAX_TOLERATED_MISSES}, using last known = {fallback_value}")
             else:
                 print(f"[WARNING] {field_name}: {miss_count} consecutive misses, exceeded limit.")
+                # Secondary fallback for soil moisture: try OpenMeteo after last_known runs out.
+                if field_name == "calibrated":
+                    fallback_value = self.weather_fallback.get_soil_moisture()
+                    if fallback_value is not None:
+                        print(f"[WARNING] {field_name}: using OpenMeteo soil moisture as secondary fallback = {fallback_value}")
 
         if fallback_value is not None:
             self._record_good_value(field_name, fallback_value)
@@ -472,7 +574,7 @@ class EnvironmentPipeline:
             writer = csv.writer(f)
             if not file_exists:
                 writer.writerow(["timestamp_unix", "timestamp_utc", "field", "value"])
-            utc_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))
+            utc_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.localtime(timestamp))
             writer.writerow([timestamp, utc_str, field_name, value])
 
     # -------------------------------------------------------------------------
@@ -511,7 +613,8 @@ class EnvironmentPipeline:
 
     def _heartbeat_trick(self):
         if self.on_new_reading is not None:
-            self.on_new_reading(self.get_data())
+            # Heartbeat has no incoming message, so status is None.
+            self.on_new_reading(self.get_data(), None)
         self._schedule_heartbeat()
 
     
