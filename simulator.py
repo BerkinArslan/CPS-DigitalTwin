@@ -1,9 +1,12 @@
 from evapotranspiration import water_volume_loss_to_evaporation
 from system import IrrigationSystem
-from nodes import Pot
+from nodes import Pot, WaterTank
+from links import Pump
 from Data_pipeline.pipeline_with_fallback import EnvironmentPipeline, WeatherFallback
 import time
 from Data_pipeline.run_pipeline import on_new_reading
+from utils import prob_percent
+
 
 class Simulation:
 
@@ -95,25 +98,107 @@ class Auto_Predict_Simulator(Simulation):
         # decide on averaging window or last value
         # maybe snapshot methods would work better for this workflow. It outputs None
 
-        data_pipeline.start()
+
+    def auto_simulate(self,
+                      soil_albedo: float = 0.2,
+                      soil_absorption_ratio: float = 0.3,
+                      pump_percent: float = 1,
+                      time_scale: float = 1,
+                      ):
+
+        self.data_pipeline.start()
+
+        last_moisture = None
+        simulation_moisture = None
+        last_step_time = time.time()
 
         try:
             while True:
                 time.sleep(1)
+
                 # TODO: find how to if query to see if there is a new moisture reading
-                temp_c = data_pipeline.get_data('temperature_c')
-                humidity = data_pipeline.get_data('humidity')
-                pressure = data_pipeline.get_data('pressure')
-                irradiation = data_pipeline.get_data('light_lux')
-                soil_moisture = data_pipeline.get_data('soil_moisture')
+                temp_c = self.data_pipeline.get_data('temperature_c')
+                humidity = self.data_pipeline.get_data('humidity_rel')
+                pressure = self.data_pipeline.get_data('pressure_hpa')
+                irradiation = self.data_pipeline.get_data('light_lux')
+                soil_moisture = self.data_pipeline.get_data('calibrated')
+                wind_speed = self.data_pipeline.get_data('wind_speed')
 
                 print(f"Temperature: {temp_c}\n"
                       f"Humidity: {humidity}\n"
                       f"Air pressure: {pressure}\n"
                       f"Soil moisture: {soil_moisture}\n"
-                      f"Irradiation: {irradiation}\n")
-        except KeyboardInterrupt:
-            data_pipeline.stop()
+                      f"Irradiation: {irradiation}\n"
+                      f"Wind speed: {wind_speed}\n")
+
+                if None in (temp_c, wind_speed, irradiation, soil_moisture, humidity):
+                    continue
+
+                if last_moisture != soil_moisture:
+                    last_moisture = soil_moisture
+
+                    if simulation_moisture is None:
+                        simulation_moisture = soil_moisture
+
+                        pots = [pot for pot_name, pot in self.system.nodes.items()
+                                if isinstance(pot, Pot)]
+
+                        for pot in pots:
+                            pot.moisture = simulation_moisture
+                            pot.calculate_water_volume_from_moisture()
+                        last_step_time = time.time()
+
+                    else:
+                        if prob_percent(pump_percent):
+                            pumps = [pump for pump_name, pump in self.system.links.items()
+                                    if isinstance(pump, Pump)]
+                            for pump in pumps:
+                                pump.activation_time = 1
+
+                            pipe_volumes = self.system.flow_simulation_step(0)
+                            for pump in pumps:
+                                pump.activation_time = 0
+
+                        now = time.time()
+                        step_time = now - last_step_time
+                        step_time = step_time * time_scale
+                        last_step_time = now
+
+                        self.system.evapotranspiration_simulation_step(
+                            step_time,
+                            temp_c,
+                            wind_speed,
+                            irradiation,
+                            soil_albedo,
+                            soil_absorption_ratio,
+                            self.crop_coefficient,
+                            self.balcony_mc_coefficient,
+                            self.evaporation_efficiency,
+                            relative_humidity=humidity
+                        )
+
+                    moistures = {
+                        pot_name: pot.moisture
+                        for pot_name, pot in self.system.nodes.items()
+                        if isinstance(pot, Pot)
+                    }
+
+                    tank_levels = {
+                        tank_name: tank.head
+                        for tank_name, tank in self.system.nodes.items()
+                        if isinstance(tank, WaterTank)
+                    }
+
+                    yield {
+                        'Tank levels': tank_levels,
+                        'Soil moisture levels': moistures,
+                        'System': self.system,
+                        'Inputs': {'temp_c': temp_c, 'irradiation': irradiation,
+                                   'humidity': humidity, 'wind_speed': wind_speed},
+                    }
+
+        finally:
+            self.data_pipeline.stop()
 
 
 if __name__ == "__main__":

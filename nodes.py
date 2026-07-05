@@ -59,6 +59,15 @@ class WaterTank(Node):
                         * self.initial_volume + self.min_head
         self.volume = self.initial_volume
 
+    def update_head(self):
+        """
+        Recalculates head from the current volume (same linear relation
+        as in __init__). Call after every volume change.
+        """
+        self.head = ((self.max_head - self.min_head) / self.max_volume) \
+                        * self.volume + self.min_head
+        return self.head
+
 class Pot(Node):
     """
     Represents a pot in systems

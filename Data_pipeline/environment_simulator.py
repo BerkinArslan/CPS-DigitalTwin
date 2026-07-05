@@ -76,8 +76,12 @@ class EnvironmentSimulator:
             # Convert solar radiation (W/m²) to lux.
             # Rule of thumb for natural daylight: 1 W/m² ≈ 120 lux.
             # Clamped to BH1750 sensor maximum of 65 535 lux.
+            #TODO:
+            # The input to the simulation should be in J which can be easily
+            # calculated with W/m^2. It is also physical value.
+            # Use W/m^2 and change names to irradiation. Dont mention lux. -Berkin
             radiation           = current["shortwave_radiation"]      # W/m²
-            self.real_light_lux = min(round(radiation * 120, 1), 65535.0)
+            self.real_light_lux = radiation #min(round(radiation * 120, 1), 65535.0)
 
 
             # ---- hourly soil moisture ----

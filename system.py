@@ -170,12 +170,23 @@ class IrrigationSystem:
         self.get_node(start_node).outgoing_links.append(pipe)
         self.get_node(end_node).incoming_links.append(pipe)
 
-    def visualize_standard(self, size:float = 1, show_states:bool = True):
+    def visualize_standard(self, size:float = 1, show_states:bool = True, ax=None,
+                           font_size: float = 9, shape_scale: float = 0.6):
         """
         Visualizes the system in  simple plot
+        :param ax: optional matplotlib axis to draw on (for live animation).
+                   If None, creates its own figure and blocks with plt.show().
+        :param font_size: text size in points (independent of shape size)
+        :param shape_scale: shrinks node shapes relative to coordinate distances
+                            so neighbouring nodes don't touch (1.0 = old look)
         :return:
         """
-        fig, ax = plt.subplots()
+        shape = size * shape_scale
+        own_figure = ax is None
+        if own_figure:
+            fig, ax = plt.subplots()
+        else:
+            ax.clear()
 
         x_min, x_max = float('inf'), float('-inf')
         y_min, y_max = float('inf'), float('-inf')
@@ -194,7 +205,7 @@ class IrrigationSystem:
             if isinstance(node, WaterTank):
                 #plt.scatter(node.coordinates[0], node.coordinates[1], c='b')
 
-                w, h = 1 * size, 1 * size
+                w, h = 1 * shape, 1 * shape
                 tank = Rectangle(
                     (x - w/2, y - h/2),
                     w, h,
@@ -204,15 +215,16 @@ class IrrigationSystem:
                 )
                 ax.add_patch(tank)
                 if show_states:
-                    ax.text(x - 3 * size, y,
+                    ax.text(x, y + h/2 + 0.15 * size,
                         f'{node_name}\nVolume: {(node.volume/node.max_volume) * 100:.0f}%',
-                        fontsize=3*size, bbox=dict(facecolor='white', edgecolor='black'))
+                        fontsize=font_size, ha='center', va='bottom',
+                        bbox=dict(facecolor='white', edgecolor='black'))
 
             #plot pots looking like a pot in a plant
             elif isinstance(node, Pot):
-                top_w = 1.0 * size
-                bottom_w = 0.6 * size
-                h = 1.0 * size
+                top_w = 1.0 * shape
+                bottom_w = 0.6 * shape
+                h = 1.0 * shape
 
                 points_pot = [
                     (x - top_w/2, y + bottom_w/2),
@@ -225,8 +237,8 @@ class IrrigationSystem:
                                     facecolor = 'saddlebrown',
                                     edgecolor = 'black',
                                     linewidth = 1*size,)
-                plant_w = 0.1 * size
-                plant_h = 0.5 * size
+                plant_w = 0.1 * shape
+                plant_h = 0.5 * shape
 
                 plant_shape = Rectangle(
                     (x - plant_w/2, y + plant_h/2),
@@ -238,8 +250,11 @@ class IrrigationSystem:
                 # ax.text(x - 0.3*size, y - 0.1*size, f'{100 * (node.moisture - node.min_moisture) /\
                 #     (node.max_moisture + node.min_moisture):.0f}%',
                 #         fontsize=3*size, color='white')
-                ax.text(x - 0.3*size, y - 0.1*size, f'{100 * node.moisture:.0f}%',
-                        fontsize=3*size, color='white')
+                if show_states:
+                    ax.text(x, y + h/2 + 0.15 * size,
+                            f'{node_name}\nMoisture: {100 * node.moisture:.0f}%',
+                            fontsize=font_size, ha='center', va='bottom',
+                            bbox=dict(facecolor='white', edgecolor='black'))
             else:
                 ax.scatter(x, y, c='black')
 
@@ -257,7 +272,8 @@ class IrrigationSystem:
         padding = 1.5 * size
         ax.set_xlim(x_min - padding, x_max + padding)
         ax.set_ylim(y_min - padding, y_max + padding)
-        plt.show()
+        if own_figure:
+            plt.show()
 
     # def simulation_step(self, dt):
     #     """
@@ -272,7 +288,7 @@ class IrrigationSystem:
     #             link.start_node.volume = link.start_node.volume - flow_volume
     #             link.end_node.volume = link.end_node.volume + flow_volume
 
-
+    # Conservation of mass
     def _node_inflows(self, pipe_volumes, node_names):
         """
         adds inflow of the pipe to end nodes and substract it from the outflows
@@ -308,30 +324,39 @@ class IrrigationSystem:
             for node_name, volume in inflows.items()
         }
 
+    #Ax = b
     def _solve_resistance_network(self, tanks, pots, volume):
         """
         calculates the pipe flow volumes for a fixed total volume.
 
-        to set the flow direction and have distance metric
-        we are going to relative head difference.
+        real heads are unknown, so we pin relative heads at the boundaries
+        just to set the flow direction and get the flow proportions:
         pot head = 0
         tank head = 1
+        these fake values give the correct proportions but the wrong total,
+        so at the end all flows are rescaled so the tanks together
+        give out exactly `volume`
 
-        A is the conductance of every node inbetween them
-        b is the conductance of the boundary nodes
-        x is the relative head of each node
+        for every unknown node (the nodes between tanks and pots) we write
+        mass conservation: sum over neighbors of C * (h_i - h_j) = 0
+        stacking one equation per unknown node gives the system Ax = b
 
-        this clacualtes the loss of energy in the pipes
-        for normalized energy "head"
+        A is the coefficient table of these equations, row i = node i:
+            A[i][i] = sum of conductances touching node i
+            A[i][j] = -conductance between node i and unknown neighbor j
+            (the minus is the second half of expanding C * (h_i - h_j))
+        x is the heads of the unknown nodes (what the solver returns)
+        b is the known part of the same equations: conductance to a
+            boundary neighbor times that neighbor's pinned head
 
-        in this function a constand head/energy assumed
-        for systems wiht big elevation difference this function
+        in this function a constant head/energy is assumed
+        for systems with big elevation difference this function
         may not give good results
 
-        :param tanks: sources of water
-        :param pots: sinks of the graph
-        :param volume:
-        :return:
+        :param tanks: sources of water (head pinned to 1)
+        :param pots: sinks of the graph (head pinned to 0)
+        :param volume: total volume to distribute from tanks to pots
+        :return: (pipe_volumes, tank_outflows, pot_inflows)
         """
 
         if volume <= 0:
@@ -561,11 +586,19 @@ class IrrigationSystem:
                 requested_volume=requested_volume,
             )
 
-            downstream_pipe_volumes, _, pot_in = self._solve_resistance_network(
-                tanks=[pump.end_node],
-                pots=pot_names,
-                volume=actual_volume,
-            )
+            if isinstance(self.nodes[pump.end_node], Pot):
+                # Pump discharges directly into a pot: there is no downstream
+                # pipe network to solve, the resistance network would mark the
+                # pot as source AND sink and return nothing (water vanished).
+                # Deliver the full pumped volume straight to that pot instead.
+                downstream_pipe_volumes = {}
+                pot_in = {pump.end_node: actual_volume}
+            else:
+                downstream_pipe_volumes, _, pot_in = self._solve_resistance_network(
+                    tanks=[pump.end_node],
+                    pots=pot_names,
+                    volume=actual_volume,
+                )
 
             for pipe_name, volume in upstream_pipe_volumes.items():
                 pipe_volumes[pipe_name] = pipe_volumes.get(pipe_name, 0.0) + volume
@@ -579,6 +612,7 @@ class IrrigationSystem:
             for tank_name, volume in tank_out.items():
                 self.nodes[tank_name].volume = (
                         self.nodes[tank_name].volume - volume)
+                self.nodes[tank_name].update_head()
 
             for pot_name, volume in pot_in.items():
                 self.nodes[pot_name].step_water_in = (
@@ -604,7 +638,8 @@ class IrrigationSystem:
                                            soil_absorption_ratio: float,
                                            crop_coefficient: float = 1,
                                            balcony_mc_coefficient: float = 0.75,
-                                           evaporation_efficiency: float = 0.45
+                                           evaporation_efficiency: float = 0.45,
+                                           relative_humidity: float = 0.5,
                                            ):
         """
         Calcualtes the water loss in that time step for the given schedule
@@ -629,6 +664,7 @@ class IrrigationSystem:
                 max_soil_moisture=self.nodes[pot_name].max_moisture,
                 canopy_energy_absorption=plant_energy_absorption,
                 soil_energy_absorption=soil_energy_absorption,
+                relative_humidity=relative_humidity,
             )
 
             pot_et = crop_evapotranspiration(ref_et,

@@ -71,3 +71,11 @@ def relevant_nodes(graph: dict, tanks, pots):
     return relevant_nodes
 
 
+#stack overflow code, credit: Jonas Friedrich
+def prob_percent(p):
+    a = np.random.randint(1,101)
+    if a <= p:
+        decision = True
+    else: decision = False
+    return decision
+
