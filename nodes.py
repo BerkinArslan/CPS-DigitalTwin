@@ -123,6 +123,8 @@ class Pot(Node):
         #first dummy function
         if self.water_volume > self.soil_volume:
             self.water_volume = self.soil_volume
+        if self.water_volume < self.min_moisture * self.soil_volume:
+            self.water_volume = self.min_moisture * self.soil_volume
         self.moisture = self.water_volume / self.soil_volume
         return self.moisture
 

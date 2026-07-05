@@ -218,7 +218,8 @@ class IrrigationSystem:
                     ax.text(x, y + h/2 + 0.15 * size,
                         f'{node_name}\nVolume: {(node.volume/node.max_volume) * 100:.0f}%',
                         fontsize=font_size, ha='center', va='bottom',
-                        bbox=dict(facecolor='white', edgecolor='black'))
+                        clip_on=True)
+                        #bbox=dict(facecolor='white', edgecolor='black'))
 
             #plot pots looking like a pot in a plant
             elif isinstance(node, Pot):
@@ -254,7 +255,8 @@ class IrrigationSystem:
                     ax.text(x, y + h/2 + 0.15 * size,
                             f'{node_name}\nMoisture: {100 * node.moisture:.0f}%',
                             fontsize=font_size, ha='center', va='bottom',
-                            bbox=dict(facecolor='white', edgecolor='black'))
+                            clip_on=True)
+                            #bbox=dict(facecolor='white', edgecolor='black'))
             else:
                 ax.scatter(x, y, c='black')
 
@@ -269,7 +271,10 @@ class IrrigationSystem:
 
         ax.set_aspect('equal')
         ax.set_axis_off()
-        padding = 1.5 * size
+        # padding scales with the network extent too, so labels of edge nodes
+        # keep fitting inside the axes for wide networks at small `size`
+        span = max(x_max - x_min, y_max - y_min, 1)
+        padding = max(1.5 * size, 0.15 * span)
         ax.set_xlim(x_min - padding, x_max + padding)
         ax.set_ylim(y_min - padding, y_max + padding)
         if own_figure:

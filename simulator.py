@@ -78,7 +78,8 @@ class Simulation:
             pot.update_moisture()
 
 class Auto_Predict_Simulator(Simulation):
-
+    #TODO: fallback method is included in the datapipeline
+    # remove fallback from input parameters
     def __init__(self,
                  data_pipeline: EnvironmentPipeline,
                  data_fallback: WeatherFallback,
@@ -93,6 +94,8 @@ class Auto_Predict_Simulator(Simulation):
 
         self.data_pipeline = data_pipeline
         self.data_fallback = data_fallback
+        self.pause = False
+        self.stop_requested = False
         #TODO:
         # make this connect ot the MQTT and make prediction automatically
         # decide on averaging window or last value
@@ -111,9 +114,15 @@ class Auto_Predict_Simulator(Simulation):
         last_moisture = None
         simulation_moisture = None
         last_step_time = time.time()
+        sim_elapsed = 0.0  # simulated seconds, excludes pauses
 
         try:
             while True:
+                if self.stop_requested:
+                    break
+                while self.pause and not self.stop_requested:
+                    time.sleep(0.01)
+                    last_step_time = time.time()
                 time.sleep(1)
 
                 # TODO: find how to if query to see if there is a new moisture reading
@@ -163,6 +172,7 @@ class Auto_Predict_Simulator(Simulation):
                         step_time = now - last_step_time
                         step_time = step_time * time_scale
                         last_step_time = now
+                        sim_elapsed = sim_elapsed + step_time
 
                         self.system.evapotranspiration_simulation_step(
                             step_time,
@@ -184,7 +194,7 @@ class Auto_Predict_Simulator(Simulation):
                     }
 
                     tank_levels = {
-                        tank_name: tank.head
+                        tank_name: tank.volume / tank.max_volume
                         for tank_name, tank in self.system.nodes.items()
                         if isinstance(tank, WaterTank)
                     }
@@ -192,6 +202,7 @@ class Auto_Predict_Simulator(Simulation):
                     yield {
                         'Tank levels': tank_levels,
                         'Soil moisture levels': moistures,
+                        'Sim time': sim_elapsed,
                         'System': self.system,
                         'Inputs': {'temp_c': temp_c, 'irradiation': irradiation,
                                    'humidity': humidity, 'wind_speed': wind_speed},

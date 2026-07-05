@@ -1,0 +1,6 @@
+INITIAL_LATITUDE = 52.52
+INITIAL_LONGITUDE = 13.405
+BROKER = "broker.hivemq.com"
+PORT = 1883
+
+
