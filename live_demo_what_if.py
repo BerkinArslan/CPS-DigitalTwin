@@ -19,34 +19,151 @@ if __name__ == "__main__":
 
     system.add_water_tank(
         name='Tank1',
-        coordinates=(0,0),
+        coordinates=(0, 0),
         elevation=0,
-        max_head=1.5,
+        max_head=10,
         min_head=0,
-        max_volume=5,
-        initial_volume=3
+        max_volume=100,
+        initial_volume=50,
+    )
+
+    system.add_node(
+        name='Node1',
+        coordinates=(0, 20),
+        elevation=0,
+    )
+
+    system.add_pump(
+        name='Pipe1',
+        start_node='Tank1',
+        end_node='Node1',
+        length=20,
+        diameter=10,
+        roughness=None,
+        power=None,
+        flow_rate=0.5,
+        activation_time=5,
+    )
+
+    system.add_node(
+        name='Node2',
+        coordinates=(0, 20),
+        elevation=10,
+    )
+
+    system.add_pipe(
+        name='Pipe2',
+        start_node='Node1',
+        end_node='Node2',
+        length=20,
+        diameter=10,
+        roughness=None,
     )
 
     system.add_pot(
         name='Pot1',
-        coordinates=(1,0),
-        elevation=0,
-        soil_volume=5,
-        max_moisture=1.0,
-        min_moisture=0.0,
-        initial_moisture=0.7
+        coordinates=(10, 20),
+        elevation=10,
+        soil_volume=10,
+        max_moisture=1,
+        min_moisture=0,
+        initial_moisture=0.54,
     )
 
-    system.add_pump(
-        name='Pump1',
-        start_node='Tank1',
+    system.add_pipe(
+        name='Pipe3',
+        start_node='Node2',
         end_node='Pot1',
-        length=1,
-        diameter=0.002,
+        length=20,
+        diameter=10,
         roughness=None,
-        power=None,
-        flow_rate=1,
-        activation_time=0
+    )
+
+    system.add_node(
+        name='Node4',
+        coordinates=(20, 20),
+        elevation=10,
+    )
+
+    system.add_pipe(
+        name='Pipe4',
+        start_node='Node2',
+        end_node='Node4',
+        length=20,
+        diameter=10,
+        roughness=None,
+    )
+
+    system.add_pot(
+        name='Pot2',
+        coordinates=(30, 20),
+        elevation=10,
+        soil_volume=10,
+        max_moisture=1,
+        min_moisture=0,
+        initial_moisture=0.74,
+    )
+
+    system.add_pipe(
+        name='Pipe5',
+        start_node='Node4',
+        end_node='Pot2',
+        length=20,
+        diameter=10,
+        roughness=None,
+    )
+
+    system.add_node(
+        name='Node5',
+        coordinates=(20, 10),
+        elevation=10,
+    )
+
+    system.add_pipe(
+        name='Pipe6',
+        start_node='Node4',
+        end_node='Node5',
+        length=20,
+        diameter=10,
+        roughness=None,
+    )
+
+    system.add_pot(
+        name='Pot3',
+        coordinates=(30, 10),
+        elevation=10,
+        soil_volume=10,
+        max_moisture=1,
+        min_moisture=0,
+        initial_moisture=0.38,
+    )
+
+    system.add_pipe(
+        name='Pipe7',
+        start_node='Node5',
+        end_node='Pot3',
+        length=20,
+        diameter=10,
+        roughness=None,
+    )
+
+    system.add_pot(
+        name='Pot4',
+        coordinates=(20, 5),
+        elevation=10,
+        soil_volume=10,
+        max_moisture=1,
+        min_moisture=0,
+        initial_moisture=0.67,
+    )
+
+    system.add_pipe(
+        name='Pipe8',
+        start_node='Node5',
+        end_node='Pot4',
+        length=20,
+        diameter=10,
+        roughness=None,
     )
 
     fallback = WeatherFallback(
@@ -72,6 +189,13 @@ if __name__ == "__main__":
     plt.style.use("cyberpunk")
     plt.ion()
     fig = plt.figure(figsize=(13, 6), constrained_layout=True)
+
+
+    def gui_pause(seconds):
+        fig.canvas.draw_idle()
+        fig.canvas.start_event_loop(seconds)
+
+
     ax_moist = fig.add_subplot(2, 2, 3)
     ax_irradiation = fig.add_subplot(2, 2, 1)
     ax_dt = fig.add_subplot(1, 2, 2)
@@ -159,7 +283,8 @@ if __name__ == "__main__":
             try:
                 state = state_q.get(timeout=0.05)
             except queue.Empty:
-                plt.pause(0.05)  # nothing new — keep GUI responsive
+                plt.pause(0.05)
+                #gui_pause(0.05)
                 continue
             if state is None:
                 break
@@ -218,12 +343,14 @@ if __name__ == "__main__":
             ax_tank.yaxis.set_label_position("right")
             ax_irradiation.grid(True)
 
-            state['System'].visualize_standard(show_states=True,
+            state['System'].visualize_standard(size=5,
+                                               show_states=True,
                                                ax=ax_dt)
 
 
             #fig.canvas.draw_idle()
             plt.pause(0.01)
+            #gui_pause(0.01)
 
     except KeyboardInterrupt:
         pass
@@ -231,7 +358,6 @@ if __name__ == "__main__":
     plt.ioff()
     plt.show()
     mplcyberpunk.make_lines_glow(ax_moist)
-
 
 
 
