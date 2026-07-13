@@ -262,7 +262,7 @@ if __name__ == "__main__":
     state_q = queue.Queue()
     def run_sim():
         try:
-            for s in simulator.auto_simulate(pump_percent=5, time_scale=900):
+            for s in simulator.auto_simulate(pump_percent=10, time_scale=900):
                 state_q.put(s)
         finally:
             state_q.put(None)

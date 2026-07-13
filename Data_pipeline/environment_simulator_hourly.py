@@ -171,6 +171,6 @@ if __name__ == "__main__":
         broker="broker.hivemq.com",
         port=1883,
         interval=5,
-        time_scale=900,   # keep equal to time_scale in live_demo_sped_up.py
+        time_scale=900,
     )
     sim.run()
