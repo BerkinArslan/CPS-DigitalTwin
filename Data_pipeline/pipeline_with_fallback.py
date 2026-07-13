@@ -213,10 +213,8 @@ class WeatherFallback:
             response = requests.get(self.url, params=params, timeout=5)
             response.raise_for_status()
             radiation = response.json()["current"]["shortwave_radiation"]  # W/m²
-            # NOTE: returns W/m2 directly (no *120 lux conversion) to stay
-            # consistent with environment_simulator, which publishes W/m2
-            # in the light_lux field. See TODO in environment_simulator.py.
-            return round(radiation, 1)
+            lux = round(radiation * 120, 1)
+            return min(lux, 65535.0)  # clamp to BH1750 sensor max
         except (requests.RequestException, KeyError, ValueError) as e:
             print(f"[Fallback] OpenMeteo light_lux failed: {e}")
             return None
