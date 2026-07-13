@@ -80,7 +80,12 @@ class Pot(Node):
                  max_moisture: float,
                  min_moisture: float,
                  initial_moisture: float,
-                 pot_area: float = 0.08):
+                 pot_area: float = 0.08,
+                 moisture_ref: float = 0.31,       # sensor reading at V = 0 reference (dry-soil reading)
+                 cal_slope: float = 0.3349,        # moisture change per liter retained water [1/L]
+                 drain_slope: float = -0.2870,     # retained-per-dose vs fill level, slope [-]
+                 drain_intercept: float = 0.3047,  # retained-per-dose vs fill level, intercept [L]
+                 ):
         """
         Creates a new pot object
         :param name: Name of the pot
@@ -90,6 +95,13 @@ class Pot(Node):
         :param max_moisture: Maximum possible moisture level of the pot
         :param min_moisture: Minimum possible moisture level of the pot
         :param initial_moisture: Moisture level at initiation
+        :param moisture_ref: Sensor moisture reading at the calibration reference (V = 0)
+        :param cal_slope: Moisture increase per liter of retained water
+        :param drain_slope: Slope of retained water per dose vs current fill level
+        :param drain_intercept: Intercept of retained water per dose [L]
+
+        Calibration values are computed by soil_moisture_experiment.py from the
+        watering experiment (run it to reproduce them).
         """
         super().__init__(name, coordinates, elevation)
         #Static states
@@ -99,42 +111,48 @@ class Pot(Node):
         self.initial_moisture = initial_moisture
         self.pot_area = pot_area
 
+        #Calibration (from soil_moisture_experiment.py)
+        self.moisture_ref = moisture_ref
+        self.cal_slope = cal_slope
+        self.drain_slope = drain_slope
+        self.drain_intercept = drain_intercept
+        self.water_capacity = -drain_intercept / drain_slope
+
         #Dynamic simulation states
         self.moisture = initial_moisture
         self.step_water_in = 0.0
+        self.step_water_drained = 0.0
         self.water_volume = self.calculate_water_volume_from_moisture()
 
-    # TODO:
-    #  Import implemented mathematical model and use it in this method
     def update_moisture(self):
         """
-        Updates the moisture level of the pot according to mathematical model
-        :param water_flow: input water flow (rain or irrigation)
-        :return:moisture level
+        Adds the incoming step water to the pot: the part the soil can retain
+        (linear drainage model from the experiment) stays, the rest drains and
+        is stored in step_water_drained. Then recalculates moisture.
+        :return: moisture level
         """
-        self.water_volume = self.water_volume +  self.step_water_in
+        added = self.step_water_in
+        retained = self.drain_slope * self.water_volume + self.drain_intercept
+        retained = min(max(retained, 0.0), added)  # cannot retain more than was added
+        self.step_water_drained = added - retained
+        self.water_volume = self.water_volume + retained
         self.step_water_in = 0.0
         self.calculate_moisture_from_water_volume()
 
     def calculate_moisture_from_water_volume(self):
         """
-        calcualtes the moisture from water volume in the pot
+        Maps retained water volume [L] to sensor moisture reading,
+        linear calibration from the watering experiment.
         """
-        #first dummy function
-        if self.water_volume > self.soil_volume:
-            self.water_volume = self.soil_volume
-        if self.water_volume < self.min_moisture * self.soil_volume:
-            self.water_volume = self.min_moisture * self.soil_volume
-        self.moisture = self.water_volume / self.soil_volume
+        self.water_volume = max(0.0, min(self.water_volume, self.water_capacity))
+        self.moisture = self.moisture_ref + self.cal_slope * self.water_volume
         return self.moisture
 
 
     def calculate_water_volume_from_moisture(self):
         """
-        calculates the water volume from the moisture
+        Inverse mapping: sensor moisture reading to retained water volume [L].
         """
-        #first dummy function
-        self.water_volume = self.moisture * self.soil_volume
-        if self.water_volume > self.soil_volume:
-            self.water_volume = self.soil_volume
+        self.water_volume = (self.moisture - self.moisture_ref) / self.cal_slope
+        self.water_volume = max(0.0, min(self.water_volume, self.water_capacity))
         return self.water_volume
