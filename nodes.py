@@ -117,6 +117,9 @@ class Pot(Node):
         self.drain_slope = drain_slope
         self.drain_intercept = drain_intercept
         self.water_capacity = -drain_intercept / drain_slope
+        # V is relative to the calibration reference (soil was not fully dry there),
+        # so drier-than-reference states are negative V, down to reading min_moisture:
+        self.water_volume_min = (min_moisture - moisture_ref) / cal_slope
 
         #Dynamic simulation states
         self.moisture = initial_moisture
@@ -144,7 +147,7 @@ class Pot(Node):
         Maps retained water volume [L] to sensor moisture reading,
         linear calibration from the watering experiment.
         """
-        self.water_volume = max(0.0, min(self.water_volume, self.water_capacity))
+        self.water_volume = max(self.water_volume_min, min(self.water_volume, self.water_capacity))
         self.moisture = self.moisture_ref + self.cal_slope * self.water_volume
         return self.moisture
 
@@ -154,5 +157,5 @@ class Pot(Node):
         Inverse mapping: sensor moisture reading to retained water volume [L].
         """
         self.water_volume = (self.moisture - self.moisture_ref) / self.cal_slope
-        self.water_volume = max(0.0, min(self.water_volume, self.water_capacity))
+        self.water_volume = max(self.water_volume_min, min(self.water_volume, self.water_capacity))
         return self.water_volume
