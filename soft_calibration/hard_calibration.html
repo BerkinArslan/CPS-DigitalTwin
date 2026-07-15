@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WATR — Hard Calibration</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #FFFFFF;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    min-height: 100vh;
+  }
+  /* 16 : 9 display — record just the canvas */
+  canvas { display: block; width: 1280px; height: 720px; }
+  #btn {
+    margin-top: 14px;
+    font-size: 16px; font-weight: bold; font-family: Arial, sans-serif;
+    padding: 11px 44px; border-radius: 8px; border: none; cursor: pointer;
+    background: #1D3557; color: #FFFFFF;
+    transition: filter 0.15s;
+  }
+  #btn:hover { filter: brightness(1.15); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="btn" onclick="toggleAnim()">▶  Start</button>
+<script>
+// ── Canvas — 3840 × 2160 internal (3× retina, 16:9) ─────────────────────────
+const PR = 3, DW = 1280, DH = 720;
+const canvas = document.getElementById('c');
+canvas.width  = DW * PR;
+canvas.height = DH * PR;
+const ctx = canvas.getContext('2d');
+ctx.scale(PR, PR);
+
+// ── Layout ───────────────────────────────────────────────────────────────────
+const L = 310, R = 970;        // pot centre x
+const PT  = 260;               // pot top y
+const PH  = 195;               // pot height
+const PTW = 192;               // outer top width
+const PBW = 128;               // outer bottom width
+const WALL = 10;
+const ITW = PTW - 2*WALL;      // 172 inner top width
+const IBW = PBW - 2*WALL;      // 108 inner bottom width
+const IH  = PH  - WALL;        // 185 inner height
+const STEM_H = 186;
+const FL_Y   = PT - STEM_H;    // sunflower centre y ≈ 74
+const LAB_Y  = PT + PH + 44;   // "Physical System" / "Digital Twin" y
+
+// ── Timing (ms) ──────────────────────────────────────────────────────────────
+const T_SEARCH   = 7000;
+const T_SNAP_DUR = 680;
+const T_SNAP_END = T_SEARCH + T_SNAP_DUR;   // 7680
+const T_BLINKS   = 1800;                     // 3 × 600 ms
+const T_BLINK_END= T_SNAP_END + T_BLINKS;   // 9480
+const T_LOOP     = 16000;
+
+// Water 80 % → 69 % over one loop
+const W0 = 0.80, W1 = 0.69;
+
+// ── Colour palette ────────────────────────────────────────────────────────────
+// Physical pot
+const PP = {
+  pot:'#C07040', rim:'#D08050', soil:'#261000',
+  water:'rgba(90,195,235,0.48)',
+  stem:'#2D7A1F', leaf:'#3A9A28',
+  petal:'#FFD700', pedge:'rgba(190,130,0,0.35)',
+  disk:'#4A2200', ddot:'rgba(255,175,0,0.55)',
+};
+// Digital twin
+const DP = {
+  pot:'#6A6A6A', rim:'#808080', soil:'#1A1A1A',
+  water:'rgba(150,215,235,0.14)',
+  stem:'#505050', leaf:'#424242',
+  petal:'#888888', pedge:'rgba(120,120,120,0.3)',
+  disk:'#2E2E2E', ddot:'rgba(160,160,160,0.4)',
+  glow:'#5BB8F5',
+};
+// Named line colours (matches drift_animation palette)
+const COL_TRUE  = '#5BB8F5';   // sky blue  — true water level (physical)
+const COL_SENS  = '#1D3557';   // navy      — physical sensor reading
+const COL_MODEL = '#E63946';   // red       — model estimate (digital twin)
+const NAVY  = '#1D3557';
+const BLUE  = '#457B9D';
+const DGRAY = '#323232';
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const lerp  = (a,b,t) => a + (b-a)*t;
+const clamp = (v,lo,hi) => Math.max(lo, Math.min(hi, v));
+const ease  = t => t<.5 ? 2*t*t : -1+(4-2*t)*t;
+function iPotW(y) { return lerp(ITW, IBW, clamp((y-PT)/IH, 0, 1)); }
+function clipInner(cx) {
+  ctx.beginPath();
+  ctx.moveTo(cx-ITW/2,PT);    ctx.lineTo(cx+ITW/2,PT);
+  ctx.lineTo(cx+IBW/2,PT+IH); ctx.lineTo(cx-IBW/2,PT+IH);
+  ctx.closePath(); ctx.clip();
+}
+
+// ── Background + grid ─────────────────────────────────────────────────────────
+function drawBG() {
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, DW, DH);
+
+  // Grid — right half (digital side), clearly visible
+  const gs = 36;
+  ctx.strokeStyle = 'rgba(91,184,245,0.22)';
+  ctx.lineWidth = 0.8;
+  for (let x = DW/2; x < DW+gs; x += gs) {
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,DH); ctx.stroke();
+  }
+  for (let y = 0; y < DH+gs; y += gs) {
+    ctx.beginPath(); ctx.moveTo(DW/2,y); ctx.lineTo(DW,y); ctx.stroke();
+  }
+
+  // Centre divider
+  ctx.strokeStyle='rgba(0,0,0,0.12)';
+  ctx.lineWidth=1; ctx.setLineDash([7,7]);
+  ctx.beginPath(); ctx.moveTo(DW/2,20); ctx.lineTo(DW/2,DH-20); ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+// ── 16:9 crop-guide border ────────────────────────────────────────────────────
+function drawCropGuide() {
+  ctx.strokeStyle = 'rgba(100,100,100,0.30)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([]);
+  ctx.strokeRect(1, 1, DW-2, DH-2);
+}
+
+// ── Pot ───────────────────────────────────────────────────────────────────────
+function drawPot(cx, wFrac, dig) {
+  const C = dig ? DP : PP;
+
+  if (dig) { ctx.shadowBlur=12; ctx.shadowColor=DP.glow; }
+  ctx.beginPath();
+  ctx.moveTo(cx-PTW/2,PT);    ctx.lineTo(cx+PTW/2,PT);
+  ctx.lineTo(cx+PBW/2,PT+PH); ctx.lineTo(cx-PBW/2,PT+PH);
+  ctx.closePath(); ctx.fillStyle=C.pot; ctx.fill();
+  if (dig) ctx.shadowBlur=0;
+
+  // Rim
+  ctx.beginPath(); ctx.rect(cx-PTW/2-4,PT-2,PTW+8,13);
+  ctx.fillStyle=C.rim; ctx.fill();
+
+  // Inner cavity — clipped
+  ctx.save(); clipInner(cx);
+
+  ctx.fillStyle=C.soil;
+  ctx.fillRect(cx-PTW/2, PT, PTW, IH);
+
+  const wTopY = PT + IH*(1-wFrac);
+  ctx.fillStyle=C.water;
+  ctx.fillRect(cx-PTW/2, wTopY, PTW, IH*wFrac);
+
+  // Water surface lines (clipped to inner pot)
+  const sw = iPotW(wTopY);
+  ctx.setLineDash([]);
+
+  if (!dig) {
+    // ── Physical pot: two overlapping lines ─────────────────────────────────
+    // 1. Sky blue — true water level (thicker, full width)
+    ctx.strokeStyle = COL_TRUE;
+    ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(cx-sw/2, wTopY); ctx.lineTo(cx+sw/2, wTopY); ctx.stroke();
+
+    // 2. Navy — physical sensor reading (thinner, 4 px below, slightly shorter)
+    //    overlaps the sky blue but both remain visible
+    ctx.strokeStyle = COL_SENS;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(cx-sw/2+5, wTopY+4); ctx.lineTo(cx+sw/2-5, wTopY+4);
+    ctx.stroke();
+  } else {
+    // Digital: subtle surface only (red line handled separately)
+    ctx.strokeStyle = 'rgba(110,190,220,0.30)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(cx-sw/2,wTopY); ctx.lineTo(cx+sw/2,wTopY); ctx.stroke();
+  }
+
+  ctx.restore();
+
+  // Digital twin cyan outlines
+  if (dig) {
+    ctx.strokeStyle='rgba(91,184,245,0.45)'; ctx.lineWidth=1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx-PTW/2,PT); ctx.lineTo(cx+PTW/2,PT);
+    ctx.lineTo(cx+PBW/2,PT+PH); ctx.lineTo(cx-PBW/2,PT+PH);
+    ctx.closePath(); ctx.stroke();
+    ctx.strokeStyle='rgba(91,184,245,0.24)'; ctx.lineWidth=1;
+    ctx.beginPath();
+    ctx.moveTo(cx-ITW/2,PT); ctx.lineTo(cx+ITW/2,PT);
+    ctx.lineTo(cx+IBW/2,PT+IH); ctx.lineTo(cx-IBW/2,PT+IH);
+    ctx.closePath(); ctx.stroke();
+  }
+}
+
+// ── Plant ─────────────────────────────────────────────────────────────────────
+function drawLeaf(cx, ly, side, dig) {
+  const C = dig ? DP : PP;
+  ctx.save();
+  ctx.translate(cx+side*7, ly); ctx.rotate(side*0.48);
+  ctx.beginPath(); ctx.ellipse(side*26,0,30,12,0,0,Math.PI*2);
+  ctx.fillStyle=C.leaf; ctx.fill();
+  if (dig) { ctx.strokeStyle='rgba(91,184,245,0.28)'; ctx.lineWidth=0.8; ctx.stroke(); }
+  ctx.restore();
+}
+
+function drawPlant(cx, dig) {
+  const C = dig ? DP : PP;
+  const sb = PT + 18;
+  if (dig) { ctx.shadowBlur=7; ctx.shadowColor=DP.glow; }
+  ctx.strokeStyle=C.stem; ctx.lineWidth=dig?4:6; ctx.lineCap='round'; ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(cx,sb);
+  ctx.bezierCurveTo(cx+10,sb-70,cx-8,sb-130,cx+2,FL_Y+22);
+  ctx.stroke();
+  if (dig) ctx.shadowBlur=0;
+  drawLeaf(cx,sb-68,-1,dig);
+  drawLeaf(cx,sb-124,1,dig);
+  if (dig) { ctx.shadowBlur=7; ctx.shadowColor=DP.glow; }
+  for (let i=0;i<13;i++) {
+    const ang=(i/13)*Math.PI*2+0.24;
+    ctx.save(); ctx.translate(cx,FL_Y); ctx.rotate(ang);
+    ctx.beginPath(); ctx.ellipse(0,-26,8.5,21,0,0,Math.PI*2);
+    ctx.fillStyle=C.petal; ctx.fill();
+    ctx.strokeStyle=C.pedge; ctx.lineWidth=0.8; ctx.stroke();
+    ctx.restore();
+  }
+  ctx.beginPath(); ctx.arc(cx,FL_Y,18,0,Math.PI*2);
+  ctx.fillStyle=C.disk; ctx.fill();
+  if (dig) { ctx.strokeStyle='rgba(91,184,245,0.35)'; ctx.lineWidth=0.8; ctx.stroke(); }
+  if (!dig) {
+    for (let i=0;i<6;i++) {
+      const a=(i/6)*Math.PI*2,r=9;
+      ctx.beginPath(); ctx.arc(cx+r*Math.cos(a),FL_Y+r*Math.sin(a),2.8,0,Math.PI*2);
+      ctx.fillStyle=C.ddot; ctx.fill();
+    }
+  }
+  if (dig) ctx.shadowBlur=0;
+}
+
+// ── Sensor / model line (digital twin only) ───────────────────────────────────
+let snapFromY = PT + IH*0.5;
+
+function drawSensor(elapsed, wFrac) {
+  const wTopY = PT + IH*(1-wFrac);
+  let lineY;
+
+  if (elapsed < T_SEARCH) {
+    // Oscillates centred on true water level — both above and below
+    // Amplitude constrained so line stays inside pot (max ≈ ±22 px)
+    const t  = elapsed;
+    const sp = t / T_SEARCH;
+    const amp = lerp(18, 6, sp);   // shrinks as it "gets closer"
+
+    lineY = wTopY
+      + amp        * Math.sin(t * 0.00222)
+      + amp * 0.52 * Math.sin(t * 0.00511 + 1.10)
+      + amp * 0.28 * Math.cos(t * 0.00874 + 0.40)
+      + amp * 0.15 * Math.sin(t * 0.01360 + 2.30);
+
+    snapFromY = lineY;
+
+  } else if (elapsed < T_SNAP_END) {
+    const p = ease((elapsed-T_SEARCH) / T_SNAP_DUR);
+    lineY = lerp(snapFromY, wTopY, p);
+
+  } else {
+    lineY = wTopY;
+    const be = elapsed - T_SNAP_END;
+    if (be < T_BLINKS) {
+      const cycle = Math.floor(be/600);
+      const frac  = (be%600)/600;
+      if (cycle < 3 && frac > 0.5) return;   // off-half of blink
+    }
+  }
+
+  // Hard clamp — stays well inside the inner pot
+  lineY = clamp(lineY, PT+6, PT+IH-6);
+
+  const hw = iPotW(lineY)/2 - 3;
+  const x1 = R-hw, x2 = R+hw;
+
+  // Always red
+  ctx.strokeStyle = COL_MODEL;
+  ctx.lineWidth = 3;
+  ctx.shadowBlur = 7;
+  ctx.shadowColor = 'rgba(230,57,70,0.65)';
+  ctx.beginPath(); ctx.moveTo(x1,lineY); ctx.lineTo(x2,lineY); ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Right-side label (red, 16px)
+  const lx = R + ITW/2 + 14;
+  ctx.font = 'bold 16px Arial'; ctx.textAlign = 'left';
+  ctx.fillStyle = COL_MODEL;
+  if (elapsed >= T_BLINK_END) {
+    ctx.fillText('locked in ✓', lx, lineY+5);
+  } else if (elapsed >= T_SNAP_END) {
+    ctx.fillText('aligning…', lx, lineY+5);
+  }
+}
+
+// ── Water % badge ─────────────────────────────────────────────────────────────
+function drawWaterBadge(cx, wFrac, dig) {
+  const wTopY = PT + IH*(1-wFrac);
+  const bx    = cx - PTW/2 - 10;
+  ctx.strokeStyle = dig ? 'rgba(91,184,245,0.55)' : 'rgba(50,150,200,0.65)';
+  ctx.lineWidth=1; ctx.setLineDash([3,3]);
+  ctx.beginPath(); ctx.moveTo(bx-6,wTopY); ctx.lineTo(bx+1,wTopY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = dig ? 'rgba(60,120,170,0.90)' : 'rgba(30,90,150,0.85)';
+  ctx.font='16px Arial'; ctx.textAlign='right';
+  ctx.fillText(Math.round(wFrac*100)+'%', bx-9, wTopY+5);
+}
+
+// ── Section labels ────────────────────────────────────────────────────────────
+function drawLabels(elapsed) {
+  ctx.fillStyle=NAVY; ctx.font='bold 16px Arial'; ctx.textAlign='center';
+  ctx.fillText('Physical System', L, LAB_Y);
+  ctx.fillText('Digital Twin',    R, LAB_Y);
+
+  // Brief alignment arrow during snap
+  if (elapsed >= T_SEARCH && elapsed < T_BLINK_END) {
+    const wTopY = PT + IH*(1-lerp(W0,W1,elapsed/T_LOOP));
+    const fa = elapsed < T_SNAP_END
+      ? ease((elapsed-T_SEARCH)/T_SNAP_DUR)*0.55
+      : 0.45*(1-(elapsed-T_SNAP_END)/T_BLINKS);
+    if (fa > 0) {
+      ctx.strokeStyle=`rgba(220,160,0,${fa})`; ctx.lineWidth=1.5; ctx.setLineDash([5,5]);
+      ctx.beginPath(); ctx.moveTo(L+PTW/2+6,wTopY); ctx.lineTo(R-PTW/2-6,wTopY);
+      ctx.stroke(); ctx.setLineDash([]);
+      for (const [ax,dir] of [[L+PTW/2+4,1],[R-PTW/2-4,-1]]) {
+        ctx.fillStyle=`rgba(220,160,0,${Math.min(1,fa*1.5)})`;
+        ctx.beginPath();
+        ctx.moveTo(ax+dir*9,wTopY); ctx.lineTo(ax,wTopY-5); ctx.lineTo(ax,wTopY+5);
+        ctx.fill();
+      }
+    }
+  }
+}
+
+// ── Legend ────────────────────────────────────────────────────────────────────
+function drawLegend() {
+  const SWATCH = 36, GAP = 10, GUTTER = 52;
+  const items = [
+    { color: COL_TRUE,  lw: 4.5, label: 'True water level' },
+    { color: COL_SENS,  lw: 2.5, label: 'Sensor reading'   },
+    { color: COL_MODEL, lw: 3,   label: 'Model estimate'   },
+  ];
+
+  ctx.font = '16px Arial';
+  const widths = items.map(it => SWATCH + GAP + ctx.measureText(it.label).width);
+  const totalW = widths.reduce((a,b)=>a+b,0) + GUTTER*(items.length-1);
+
+  const ly = LAB_Y + 32;
+  let x = (DW - totalW) / 2;
+
+  items.forEach((it, i) => {
+    // Coloured swatch line
+    ctx.strokeStyle = it.color; ctx.lineWidth = it.lw;
+    ctx.beginPath(); ctx.moveTo(x, ly); ctx.lineTo(x+SWATCH, ly); ctx.stroke();
+    // Label text
+    ctx.fillStyle = DGRAY; ctx.textAlign = 'left';
+    ctx.fillText(it.label, x+SWATCH+GAP, ly+5);
+    x += widths[i] + GUTTER;
+  });
+}
+
+// ── Full frame render ─────────────────────────────────────────────────────────
+function drawFrame(elapsed) {
+  const wFrac = lerp(W0, W1, clamp(elapsed/T_LOOP, 0, 1));
+  ctx.clearRect(0,0,DW,DH);
+  drawBG();
+  drawPot(L, wFrac, false);
+  drawPot(R, wFrac, true);
+  drawPlant(L, false);
+  drawPlant(R, true);
+  drawWaterBadge(L, wFrac, false);
+  drawWaterBadge(R, wFrac, true);
+  if (running) drawSensor(elapsed, wFrac);
+  drawLabels(elapsed);
+  drawLegend();
+  drawCropGuide();   // draw last so it's always on top
+}
+
+// ── State & controls ──────────────────────────────────────────────────────────
+let running = false, t0 = null;
+
+function toggleAnim() {
+  const btn = document.getElementById('btn');
+  if (!running) {
+    running = true; t0 = null;
+    btn.textContent = '↺  Reset';
+    btn.style.background = '#E63946';
+  } else {
+    running = false; t0 = null;
+    btn.textContent = '▶  Start';
+    btn.style.background = '#1D3557';
+    drawFrame(0);
+  }
+}
+
+// ── RAF loop ──────────────────────────────────────────────────────────────────
+function frame(ts) {
+  if (running) {
+    if (!t0) t0 = ts;
+    drawFrame((ts-t0) % T_LOOP);
+  }
+  requestAnimationFrame(frame);
+}
+
+drawFrame(0);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

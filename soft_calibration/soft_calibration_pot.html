@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WATR — Soft Calibration: Flower Pot</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#FFFFFF;font-family:'Segoe UI',Arial,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:16px}
+h1{color:#1D3557;font-size:11px;letter-spacing:2px;text-transform:uppercase;margin-bottom:5px;opacity:.6}
+.scene-label{color:#1D3557;font-size:14px;font-weight:700;margin-bottom:8px;text-align:center;min-height:20px}
+.canvas-wrap{overflow:hidden;width:640px;height:360px;flex-shrink:0}
+canvas{display:block;width:640px;height:360px}
+.controls{margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center}
+button{padding:8px 16px;border:none;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;transition:transform .1s,opacity .2s}
+button:active{transform:scale(.96)}
+#bp1{background:#1D3557;color:#fff}
+#bp2{background:#457B9D;color:#fff}
+#bp3{background:#283593;color:#fff}
+#bp4{background:#e65100;color:#fff}
+#brst{background:transparent;color:#457B9D;border:1.5px solid #457B9D}
+</style>
+</head>
+<body>
+<h1>WATR Digital Twin — Soft Calibration</h1>
+<div class="scene-label" id="sceneLabel">Press Phase 1 to begin</div>
+<div class="canvas-wrap"><canvas id="c"></canvas></div>
+<div class="controls">
+  <button id="bp1">&#9654; Phase 1 &mdash; Convergence</button>
+  <button id="bp2">&#9654; Phase 2 &mdash; Tracking</button>
+  <button id="bp3">&#9654; Phase 3 &mdash; Seasonal</button>
+  <button id="bp4">&#9654; Phase 4 &mdash; Re-calibration</button>
+  <button id="brst">&#8635; Reset</button>
+</div>
+<script>
+const PR=3,DW=640,DH=360;
+const cv=document.getElementById('c');
+cv.width=DW*PR;cv.height=DH*PR;
+const ctx=cv.getContext('2d');
+ctx.scale(PR,PR);
+
+// ── Layout at 0.5× scale of original 1280×720 ─────────────────────────────
+const L=155,R=485;
+const PT=130,PH=98,PTW=96,PBW=64,WALL=5;
+const ITW=PTW-2*WALL,IBW=PBW-2*WALL,IH=PH-WALL; // 86,54,93
+const STEM_H=93,FL_Y=PT-STEM_H;                 // FL_Y=37
+const LAB_Y=PT+PH+22;                           // 250
+
+// ── Phase moisture curves (identical to drift_animation) ──────────────────
+const S_NORM=-8,S_SEAS=-14,TP1=1,TP2=2,TP3=2.5;
+function greenFn(t){
+  if(t<=TP2)return 80+S_NORM*t;
+  return(80+S_NORM*TP2)+S_SEAS*(t-TP2);
+}
+function redFn(t){
+  if(t<=0)return 76;
+  if(t<TP1){const e=-4*Math.cos(3.1*Math.PI*t)*Math.exp(-3.5*t);return greenFn(t)+e;}
+  if(t<=TP3)return 80+S_NORM*t;
+  return(80+S_NORM*TP3)+S_SEAS*(t-TP3);
+}
+
+// ── Phase config ─────────────────────────────────────────────────────────
+const PHASES=[
+  {start:0,end:1,  label:'Phase 1 — Initial Alignment'},
+  {start:1,end:2,  label:'Phase 2 — Stable Tracking'},
+  {start:2,end:2.5,label:'Phase 3 — Seasonal Change'},
+  {start:2.5,end:4,label:'Phase 4 — Re-calibration'},
+];
+function getSpeed(p){return(PHASES[p-1].end-PHASES[p-1].start)/5;}
+
+// ── Colours (matching drift_animation) ───────────────────────────────────
+const PP={pot:'#C07040',rim:'#D08050',soil:'#261000',water:'rgba(90,195,235,0.48)',
+          stem:'#2D7A1F',leaf:'#3A9A28',petal:'#FFD700',pedge:'rgba(190,130,0,0.35)',
+          disk:'#4A2200'};
+const DP={pot:'#6A6A6A',rim:'#808080',soil:'#1A1A1A',water:'rgba(150,215,235,0.14)',
+          stem:'#505050',leaf:'#424242',petal:'#888888',pedge:'rgba(120,120,120,0.3)',
+          disk:'#2E2E2E',glow:'#5BB8F5'};
+const COL_TRUE='#5BB8F5',COL_SENS='#43a047',COL_MODEL='#e53935';
+const NAVY='#1D3557',DGRAY='#323232';
+
+const lerp=(a,b,t)=>a+(b-a)*t;
+const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+function iPotW(y){return lerp(ITW,IBW,clamp((y-PT)/IH,0,1));}
+function clipInner(cx){
+  ctx.beginPath();
+  ctx.moveTo(cx-ITW/2,PT);ctx.lineTo(cx+ITW/2,PT);
+  ctx.lineTo(cx+IBW/2,PT+IH);ctx.lineTo(cx-IBW/2,PT+IH);
+  ctx.closePath();ctx.clip();
+}
+
+// ── Background ────────────────────────────────────────────────────────────
+function drawBG(){
+  ctx.fillStyle='#FFFFFF';ctx.fillRect(0,0,DW,DH);
+  const gs=18;
+  ctx.strokeStyle='rgba(91,184,245,0.20)';ctx.lineWidth=0.6;
+  for(let x=DW/2;x<DW+gs;x+=gs){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,DH);ctx.stroke();}
+  for(let y=0;y<DH+gs;y+=gs){ctx.beginPath();ctx.moveTo(DW/2,y);ctx.lineTo(DW,y);ctx.stroke();}
+  ctx.strokeStyle='rgba(0,0,0,0.11)';ctx.lineWidth=0.8;ctx.setLineDash([5,5]);
+  ctx.beginPath();ctx.moveTo(DW/2,12);ctx.lineTo(DW/2,DH-12);ctx.stroke();
+  ctx.setLineDash([]);
+}
+function drawCropGuide(){
+  ctx.strokeStyle='rgba(100,100,100,0.22)';ctx.lineWidth=1;ctx.strokeRect(1,1,DW-2,DH-2);
+}
+
+// ── Pot (soil + water fill only; lines drawn separately) ─────────────────
+function drawPot(cx,wFrac,dig){
+  const C=dig?DP:PP;
+  if(dig){ctx.shadowBlur=8;ctx.shadowColor=DP.glow;}
+  ctx.beginPath();
+  ctx.moveTo(cx-PTW/2,PT);ctx.lineTo(cx+PTW/2,PT);
+  ctx.lineTo(cx+PBW/2,PT+PH);ctx.lineTo(cx-PBW/2,PT+PH);
+  ctx.closePath();ctx.fillStyle=C.pot;ctx.fill();
+  if(dig)ctx.shadowBlur=0;
+  ctx.beginPath();ctx.rect(cx-PTW/2-2,PT-1,PTW+4,7);ctx.fillStyle=C.rim;ctx.fill();
+  ctx.save();clipInner(cx);
+  ctx.fillStyle=C.soil;ctx.fillRect(cx-PTW/2,PT,PTW,IH);
+  const wTopY=PT+IH*(1-wFrac);
+  ctx.fillStyle=C.water;ctx.fillRect(cx-PTW/2,wTopY,PTW,IH*wFrac);
+  ctx.restore();
+  if(dig){
+    ctx.strokeStyle='rgba(91,184,245,0.40)';ctx.lineWidth=0.8;
+    ctx.beginPath();
+    ctx.moveTo(cx-PTW/2,PT);ctx.lineTo(cx+PTW/2,PT);
+    ctx.lineTo(cx+PBW/2,PT+PH);ctx.lineTo(cx-PBW/2,PT+PH);
+    ctx.closePath();ctx.stroke();
+  }
+}
+
+// ── Water surface lines ───────────────────────────────────────────────────
+// Physical: blue TRUE line + green SENSOR line offset 3 px below (both visible)
+// Digital twin: blue dashed TRUE reference + red solid MODEL estimate
+function drawWaterLines(cx,wFrac,dig,trueFrac){
+  const wTopY=clamp(PT+IH*(1-wFrac),PT+2,PT+IH-2);
+  const hw=iPotW(wTopY)/2-2;
+  ctx.save();clipInner(cx);
+  if(!dig){
+    // Blue true level (thick, at surface)
+    ctx.strokeStyle=COL_TRUE;ctx.lineWidth=3;
+    ctx.beginPath();ctx.moveTo(cx-hw,wTopY);ctx.lineTo(cx+hw,wTopY);ctx.stroke();
+    // Green sensor 3 px below — shorter so blue is still visible at edges
+    ctx.strokeStyle=COL_SENS;ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(cx-hw+4,wTopY+3);ctx.lineTo(cx+hw-4,wTopY+3);ctx.stroke();
+  } else {
+    // Blue dashed true reference
+    const trueY=clamp(PT+IH*(1-trueFrac),PT+2,PT+IH-2);
+    const hw_t=iPotW(trueY)/2-2;
+    ctx.strokeStyle=COL_TRUE;ctx.lineWidth=2;ctx.setLineDash([5,4]);
+    ctx.beginPath();ctx.moveTo(cx-hw_t,trueY);ctx.lineTo(cx+hw_t,trueY);ctx.stroke();
+    ctx.setLineDash([]);
+    // Red solid model estimate
+    ctx.strokeStyle=COL_MODEL;ctx.lineWidth=3;
+    ctx.shadowBlur=6;ctx.shadowColor='rgba(229,57,53,0.65)';
+    ctx.beginPath();ctx.moveTo(cx-hw,wTopY);ctx.lineTo(cx+hw,wTopY);ctx.stroke();
+    ctx.shadowBlur=0;
+  }
+  ctx.restore();
+}
+
+// ── Plant ─────────────────────────────────────────────────────────────────
+function drawLeaf(cx,ly,side,dig){
+  const C=dig?DP:PP;
+  ctx.save();ctx.translate(cx+side*3.5,ly);ctx.rotate(side*0.48);
+  ctx.beginPath();ctx.ellipse(side*13,0,15,6,0,0,Math.PI*2);
+  ctx.fillStyle=C.leaf;ctx.fill();
+  if(dig){ctx.strokeStyle='rgba(91,184,245,0.28)';ctx.lineWidth=0.5;ctx.stroke();}
+  ctx.restore();
+}
+function drawPlant(cx,dig){
+  const C=dig?DP:PP;
+  const sb=PT+9;
+  if(dig){ctx.shadowBlur=5;ctx.shadowColor=DP.glow;}
+  ctx.strokeStyle=C.stem;ctx.lineWidth=dig?2:3;ctx.lineCap='round';ctx.setLineDash([]);
+  ctx.beginPath();ctx.moveTo(cx,sb);
+  ctx.bezierCurveTo(cx+5,sb-35,cx-4,sb-65,cx+1,FL_Y+11);ctx.stroke();
+  if(dig)ctx.shadowBlur=0;
+  drawLeaf(cx,sb-34,-1,dig);drawLeaf(cx,sb-62,1,dig);
+  if(dig){ctx.shadowBlur=5;ctx.shadowColor=DP.glow;}
+  for(let i=0;i<13;i++){
+    const ang=(i/13)*Math.PI*2+0.24;
+    ctx.save();ctx.translate(cx,FL_Y);ctx.rotate(ang);
+    ctx.beginPath();ctx.ellipse(0,-13,4.25,10.5,0,0,Math.PI*2);
+    ctx.fillStyle=C.petal;ctx.fill();
+    ctx.strokeStyle=C.pedge;ctx.lineWidth=0.5;ctx.stroke();
+    ctx.restore();
+  }
+  ctx.beginPath();ctx.arc(cx,FL_Y,9,0,Math.PI*2);ctx.fillStyle=C.disk;ctx.fill();
+  if(dig){ctx.strokeStyle='rgba(91,184,245,0.35)';ctx.lineWidth=0.5;ctx.stroke();}
+  if(!dig){
+    for(let i=0;i<6;i++){
+      const a=(i/6)*Math.PI*2,r=4.5;
+      ctx.beginPath();ctx.arc(cx+r*Math.cos(a),FL_Y+r*Math.sin(a),1.4,0,Math.PI*2);
+      ctx.fillStyle='rgba(255,175,0,0.55)';ctx.fill();
+    }
+  }
+  if(dig)ctx.shadowBlur=0;
+}
+
+// ── Moisture badge ────────────────────────────────────────────────────────
+function drawBadge(cx,wFrac,sub){
+  const wTopY=clamp(PT+IH*(1-wFrac),PT+2,PT+IH-2);
+  const bx=cx-PTW/2-5;
+  ctx.strokeStyle='rgba(50,150,200,0.5)';ctx.lineWidth=0.7;ctx.setLineDash([2,2]);
+  ctx.beginPath();ctx.moveTo(bx-4,wTopY);ctx.lineTo(bx+1,wTopY);ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle='rgba(30,90,150,0.85)';ctx.font='bold 12px Arial';ctx.textAlign='right';
+  ctx.fillText(Math.round(wFrac*100)+'%',bx-3,wTopY+4);
+  ctx.font='9px Arial';ctx.fillStyle='#999';ctx.fillText(sub,bx-3,wTopY+14);
+}
+
+// ── Alignment arrow between pots ──────────────────────────────────────────
+function drawArrow(t,trueFrac,modelFrac){
+  const gap=Math.abs(greenFn(t)-redFn(t));
+  if(gap<0.4)return;
+  const trueY =clamp(PT+IH*(1-trueFrac),PT+4,PT+IH-4);
+  const modelY=clamp(PT+IH*(1-modelFrac),PT+4,PT+IH-4);
+  const midY=(trueY+modelY)/2;
+  const alpha=clamp(gap/9,0,0.45);
+  ctx.strokeStyle=`rgba(220,160,0,${alpha})`;ctx.lineWidth=1;ctx.setLineDash([4,4]);
+  ctx.beginPath();ctx.moveTo(L+PTW/2+4,midY);ctx.lineTo(R-PTW/2-4,midY);ctx.stroke();
+  ctx.setLineDash([]);
+  for(const[ax,dir]of[[L+PTW/2+3,1],[R-PTW/2-3,-1]]){
+    ctx.fillStyle=`rgba(220,160,0,${Math.min(1,alpha*2.2)})`;
+    ctx.beginPath();ctx.moveTo(ax+dir*6,midY);ctx.lineTo(ax,midY-4);ctx.lineTo(ax,midY+4);ctx.fill();
+  }
+}
+
+// ── Status labels ─────────────────────────────────────────────────────────
+// Phase 1 & 2: right of digital twin (calibration/tracking happens there)
+// Phase 3:     right of physical pot (drift is in the physical system)
+// Phase 4:     right of digital twin (re-calibration happens there)
+function drawStatus(t,phase){
+  ctx.font='bold 11px Arial';ctx.textAlign='left';
+  if(phase===1){
+    const modelFrac=redFn(t)/100;
+    const modelY=clamp(PT+IH*(1-modelFrac),PT+5,PT+IH-5);
+    const done=t>=0.88;
+    ctx.fillStyle=done?COL_SENS:COL_MODEL;
+    ctx.fillText(done?'Calibrated ✓':'Calibrating…',R+ITW/2+9,modelY+4);
+  } else if(phase===2){
+    const modelFrac=redFn(t)/100;
+    const modelY=clamp(PT+IH*(1-modelFrac),PT+5,PT+IH-5);
+    ctx.fillStyle='#457B9D';ctx.fillText('Tracking Kₘᶜ₁',R+ITW/2+9,modelY+4);
+  } else if(phase===3){
+    // Seasonal K_mc change in the PHYSICAL system — label anchored to physical water level
+    const trueFrac=greenFn(t)/100;
+    const trueY=clamp(PT+IH*(1-trueFrac),PT+5,PT+IH-5);
+    ctx.fillStyle='#283593';
+    ctx.fillText('Seasonal Kₘᶜ change',L+PTW/2+9,trueY+4);
+  } else {
+    const modelFrac=redFn(t)/100;
+    const modelY=clamp(PT+IH*(1-modelFrac),PT+5,PT+IH-5);
+    ctx.fillStyle=COL_SENS;ctx.fillText('Re-calibrated ✓',R+ITW/2+9,modelY+4);
+  }
+}
+
+// ── Labels & Legend ───────────────────────────────────────────────────────
+function drawLabels(){
+  ctx.fillStyle=NAVY;ctx.font='bold 12px Arial';ctx.textAlign='center';
+  ctx.fillText('Physical System',L,LAB_Y);
+  ctx.fillText('Digital Twin',R,LAB_Y);
+}
+function drawLegend(){
+  const items=[
+    {c:COL_TRUE,lw:2.5,dash:false,label:'True water level'},
+    {c:COL_SENS,lw:2,  dash:false,label:'Sensor reading'},
+    {c:COL_MODEL,lw:2.5,dash:false,label:'Model estimate'},
+  ];
+  ctx.font='11px Arial';
+  const SW=24,GAP=5,GUT=28;
+  const ws=items.map(it=>SW+GAP+ctx.measureText(it.label).width);
+  const tot=ws.reduce((a,b)=>a+b,0)+GUT*(items.length-1);
+  const ly=LAB_Y+18;
+  let x=(DW-tot)/2;
+  items.forEach(function(it,i){
+    ctx.strokeStyle=it.c;ctx.lineWidth=it.lw;
+    ctx.beginPath();ctx.moveTo(x,ly);ctx.lineTo(x+SW,ly);ctx.stroke();
+    ctx.fillStyle=DGRAY;ctx.textAlign='left';ctx.fillText(it.label,x+SW+GAP,ly+4);
+    x+=ws[i]+GUT;
+  });
+}
+
+// ── Frame ─────────────────────────────────────────────────────────────────
+function drawFrame(t,phase){
+  const trueFrac =greenFn(t)/100;
+  const modelFrac=phase>0?redFn(t)/100:trueFrac;
+  ctx.clearRect(0,0,DW,DH);
+  drawBG();
+  drawPot(L,trueFrac,false);
+  drawPot(R,modelFrac,true);
+  // Draw water lines always for physical; for digital twin only when a phase is active
+  drawWaterLines(L,trueFrac,false,null);
+  if(phase>0)drawWaterLines(R,modelFrac,true,trueFrac);
+  drawPlant(L,false);
+  drawPlant(R,true);
+  drawBadge(L,trueFrac,'actual');
+  drawBadge(R,modelFrac,'model');
+  if(phase>0){drawArrow(t,trueFrac,modelFrac);drawStatus(t,phase);}
+  drawLabels();
+  drawLegend();
+  drawCropGuide();
+}
+
+// ── Animation (same pattern as drift_animation.html) ──────────────────────
+let curPhase=0,curT=0,playing=false,raf=null,startTime=null;
+
+function playPhase(p){
+  cancelAnimationFrame(raf);
+  curPhase=p;curT=PHASES[p-1].start;playing=true;startTime=null;
+  document.getElementById('sceneLabel').textContent=PHASES[p-1].label;
+  updateBtns();step();
+}
+function step(ts){
+  if(!startTime)startTime=ts;
+  curT=PHASES[curPhase-1].start+(ts-startTime)/1000*getSpeed(curPhase);
+  const end=PHASES[curPhase-1].end;
+  if(curT>=end){curT=end;playing=false;updateBtns();}
+  drawFrame(curT,curPhase);
+  if(playing)raf=requestAnimationFrame(step);
+}
+function updateBtns(){
+  ['bp1','bp2','bp3','bp4'].forEach(function(id,i){
+    document.getElementById(id).style.opacity=(curPhase===i+1&&playing)?'1':'.7';
+  });
+}
+document.getElementById('bp1').onclick=function(){playPhase(1);};
+document.getElementById('bp2').onclick=function(){playPhase(2);};
+document.getElementById('bp3').onclick=function(){playPhase(3);};
+document.getElementById('bp4').onclick=function(){playPhase(4);};
+document.getElementById('brst').onclick=function(){
+  cancelAnimationFrame(raf);playing=false;curPhase=0;curT=0;
+  document.getElementById('sceneLabel').textContent='Press Phase 1 to begin';
+  updateBtns();drawFrame(0,0);
+};
+
+drawFrame(0,0);
+</script>
+</body>
+</html>

@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WATR — Soft Calibration: Drift Animation</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#FFFFFF;font-family:'Segoe UI',Arial,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:28px}
+h1{color:#1D3557;font-size:14px;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;opacity:.6}
+.scene-label{color:#1D3557;font-size:18px;font-weight:700;margin-bottom:14px;text-align:center;min-height:26px}
+.canvas-wrap{background:#F1FAEE;overflow:hidden;width:960px;height:540px;flex-shrink:0}
+canvas{display:block;width:960px;height:540px}
+.controls{margin-top:18px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:center}
+button{padding:11px 22px;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;letter-spacing:.4px;transition:transform .1s,opacity .2s}
+button:active{transform:scale(.96)}
+#bp1{background:#1D3557;color:#fff}
+#bp2{background:#457B9D;color:#fff}
+#bp3{background:#283593;color:#fff}
+#bp4{background:#e65100;color:#fff}
+#brst{background:transparent;color:#457B9D;border:1.5px solid #457B9D}
+.hint{color:#646464;font-size:12px;margin-top:8px;opacity:.8;letter-spacing:.3px;text-align:center}
+</style>
+</head>
+<body>
+<h1>WATR Digital Twin — Soft Calibration</h1>
+<div class="scene-label" id="sceneLabel">Press Phase 1 to begin</div>
+<div class="canvas-wrap"><canvas id="c"></canvas></div>
+<div class="controls">
+  <button id="bp1">&#9654; Phase 1 &mdash; Convergence</button>
+  <button id="bp2">&#9654; Phase 2 &mdash; Tracking</button>
+  <button id="bp3">&#9654; Phase 3 &mdash; Seasonal Change</button>
+  <button id="bp4">&#9654; Phase 4 &mdash; Re-calibration</button>
+  <button id="brst">&#8635; Reset</button>
+</div>
+<div class="hint">Phase 1: predicted converges to sensor &nbsp;&middot;&nbsp; Phase 2: both track together &nbsp;&middot;&nbsp; Phase 3: seasonal slope deviation &nbsp;&middot;&nbsp; Phase 4: soft-cal corrects slope</div>
+
+<script>
+const PR=3,DW=960,DH=540;
+const cv=document.getElementById('c');
+cv.width=DW*PR;cv.height=DH*PR;
+const ctx=cv.getContext('2d');
+ctx.scale(PR,PR);
+
+const C={bg:'#FFFFFF',green:'#43a047',red:'#e53935',seas:'#283593',
+         off:'#e65100',navy:'#1D3557',grid:'#E0E8F0',ax:'#90A4AE',text:'#1D3557'};
+
+const M={l:72,r:222,t:52,b:72};
+const CW=DW-M.l-M.r, CH=DH-M.t-M.b;
+const TMAX=4,YMIN=20,YMAX=92,TP1=1,TP2=2,TP3=2.5;
+const tx=t=>M.l+t/TMAX*CW;
+const my=v=>M.t+CH-(v-YMIN)/(YMAX-YMIN)*CH;
+const S_NORM=-8,S_SEAS=-14;
+const sX=CW/TMAX, sYm=CH/(YMAX-YMIN);
+const KMC1=Math.atan2(Math.abs(S_NORM)*sYm,sX);
+const KMC2=Math.atan2(Math.abs(S_SEAS)*sYm,sX);
+
+function greenFn(t){
+  if(t<=TP2)return 80+S_NORM*t;
+  return(80+S_NORM*TP2)+S_SEAS*(t-TP2);
+}
+function redFn(t){
+  if(t<=0)return 76;
+  if(t<TP1){const err=-4*Math.cos(3.1*Math.PI*t)*Math.exp(-3.5*t);return greenFn(t)+err;}
+  if(t<=TP3)return 80+S_NORM*t;
+  return(80+S_NORM*TP3)+S_SEAS*(t-TP3);
+}
+
+function seg(x1,y1,x2,y2,col,lw,dash){
+  ctx.save();ctx.strokeStyle=col;ctx.lineWidth=lw||1;
+  if(dash)ctx.setLineDash(dash);
+  ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
+  ctx.setLineDash([]);ctx.restore();
+}
+function curve(fn,upTo,col,lw){
+  ctx.save();ctx.strokeStyle=col;ctx.lineWidth=lw;ctx.lineJoin='round';ctx.lineCap='round';
+  ctx.beginPath();let first=true;
+  for(let t=0;t<=Math.min(upTo,TMAX);t+=0.008){
+    const x=tx(t),y=my(fn(t));
+    first?(ctx.moveTo(x,y),first=false):ctx.lineTo(x,y);
+  }
+  ctx.stroke();ctx.restore();
+}
+
+// Draw subscript-styled K_{mc1} or K_{mc2} label
+function kLabel(x,y,n,color){
+  ctx.save();
+  ctx.fillStyle=color;ctx.textAlign='left';
+  ctx.font='italic bold 15px Segoe UI';
+  ctx.fillText('K',x,y);
+  ctx.font='italic 9px Segoe UI';
+  ctx.fillText('mc'+n, x+10, y+5);
+  ctx.restore();
+}
+
+// Draw angle-arc indicator on a line at canvas point (cx,cy)
+function drawAngleArc(cx,cy,theta,color,n){
+  const R=24;
+  ctx.save();
+  ctx.strokeStyle=color;ctx.lineWidth=1.4;
+  // faint horizontal reference
+  ctx.globalAlpha=0.35;ctx.setLineDash([3,4]);
+  ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+R+4,cy);ctx.stroke();
+  ctx.setLineDash([]);ctx.globalAlpha=1;
+  // angle arc
+  ctx.beginPath();ctx.arc(cx,cy,R,0,theta);ctx.stroke();
+  // label at mid-angle, just outside arc
+  const a=theta/2;
+  const lx=cx+(R+11)*Math.cos(a);
+  const ly=cy+(R+11)*Math.sin(a);
+  kLabel(lx-2,ly+4,n,color);
+  ctx.restore();
+}
+
+// ── Panel ───────────────────────────────────────────────────────────────
+function drawPanel(phase){
+  if(phase<1||phase>4)return;
+  const px=DW-M.r+16;
+  const ptitles=['Phase 1','Phase 2','Phase 3','Phase 4'];
+  const pcolors=[C.navy,'#457B9D',C.seas,C.off];
+  ctx.fillStyle=pcolors[phase-1];ctx.font='bold 16px Segoe UI';ctx.textAlign='left';
+  ctx.fillText(ptitles[phase-1],px,M.t+22);
+
+  const ly=M.t+48;
+  ctx.fillStyle=C.text;ctx.font='bold 16px Segoe UI';
+  ctx.fillText('Legend',px,ly);
+
+  // items: type line|arc|off, minPhase, label lines, arc subscript n
+  const items=[
+    {type:'line',c:C.green, l1:'Sensor Reading',    l2:null,          ph:1},
+    {type:'line',c:C.red,   l1:'Predicted Values',  l2:null,          ph:1},
+    {type:'arc', c:C.green, l1:'Kₘᶜ₁  Initial slope',  l2:'microclimate coeff.', n:1, ph:1},
+    {type:'arc', c:C.seas,  l1:'Kₘᶜ₂  Changed slope',  l2:'Kₘᶜ₁ < Kₘᶜ₂', n:2, ph:3},
+  ];
+
+  let y=ly+24;
+  items.forEach(function(it){
+    if(it.ph>phase)return;
+    ctx.save();ctx.strokeStyle=it.c;ctx.lineWidth=1.8;
+    if(it.type==='line'){
+      ctx.beginPath();ctx.moveTo(px,y);ctx.lineTo(px+22,y);ctx.stroke();
+    } else if(it.type==='arc'){
+      // small arc icon
+      const icx=px+9,R=9;
+      ctx.globalAlpha=0.35;ctx.setLineDash([2,3]);
+      ctx.beginPath();ctx.moveTo(icx,y);ctx.lineTo(icx+R+2,y);ctx.stroke();
+      ctx.setLineDash([]);ctx.globalAlpha=1;
+      ctx.beginPath();ctx.arc(icx,y,R,0,it.n===1?KMC1:KMC2);ctx.stroke();
+    } else if(it.type==='off'){
+      ctx.beginPath();ctx.moveTo(px+10,y-6);ctx.lineTo(px+10,y+6);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(px+4,y-6);ctx.lineTo(px+16,y-6);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(px+4,y+6);ctx.lineTo(px+16,y+6);ctx.stroke();
+    }
+    ctx.restore();
+    ctx.fillStyle='#222';ctx.textAlign='left';
+    ctx.font='16px Segoe UI';
+    ctx.fillText(it.l1,px+26,y+5);
+    if(it.l2){
+      ctx.font='11px Segoe UI';ctx.fillStyle='#666';
+      ctx.fillText(it.l2,px+26,y+19);
+      y+=38;
+    } else {
+      y+=26;
+    }
+  });
+}
+
+// ── Main draw ─────────────────────────────────────────────────────────────
+let curPhase=0;
+
+function drawFrame(drawT,phase){
+  ctx.clearRect(0,0,DW,DH);
+  ctx.fillStyle=C.bg;ctx.fillRect(0,0,DW,DH);
+
+  // Grid
+  for(let v=30;v<=80;v+=10)seg(M.l,my(v),M.l+CW,my(v),C.grid,.8);
+  for(let t=0;t<=TMAX;t+=.5)seg(tx(t),M.t,tx(t),M.t+CH,C.grid,.8);
+
+  // Axes
+  seg(M.l,M.t,M.l,M.t+CH,C.ax,1.5);
+  seg(M.l,M.t+CH,M.l+CW,M.t+CH,C.ax,1.5);
+
+  // Y labels
+  ctx.fillStyle=C.ax;ctx.font='16px Segoe UI';ctx.textAlign='right';
+  for(let v=30;v<=80;v+=10)ctx.fillText(v+'%',M.l-7,my(v)+5);
+
+  // X labels
+  ctx.fillStyle=C.ax;ctx.font='16px Segoe UI';ctx.textAlign='center';
+  for(let t=0;t<=TMAX;t++)ctx.fillText(t,tx(t),M.t+CH+22);
+
+  // Axis titles
+  ctx.save();ctx.translate(14,M.t+CH/2);ctx.rotate(-Math.PI/2);
+  ctx.fillStyle=C.text;ctx.font='bold 16px Segoe UI';ctx.textAlign='center';
+  ctx.fillText('Soil Moisture (%)',0,0);ctx.restore();
+  ctx.fillStyle=C.text;ctx.font='bold 16px Segoe UI';ctx.textAlign='center';
+  ctx.fillText('Time (months)',M.l+CW/2,DH-12);
+
+  // Seasonal shading
+  if(drawT>TP2){
+    const x1=tx(TP2),x2=tx(Math.min(drawT,TP3));
+    ctx.fillStyle='rgba(40,53,147,.07)';ctx.fillRect(x1,M.t,x2-x1,CH);
+  }
+
+  // Curves
+  curve(greenFn,drawT,C.green,2.5);
+  curve(redFn,drawT,C.red,2.5);
+
+  // Seasonal dotted verticals + label
+  if(drawT>=TP2){
+    seg(tx(TP2),M.t+8,tx(TP2),M.t+CH,C.seas,2,[9,6]);
+    if(drawT>=TP2+.05){
+      ctx.fillStyle=C.seas;ctx.font='bold 16px Segoe UI';ctx.textAlign='center';
+      ctx.fillText('Seasonal Change',tx((TP2+TP3)/2),M.t+20);
+    }
+  }
+  if(drawT>=TP3)seg(tx(TP3),M.t+8,tx(TP3),M.t+CH,C.seas,2,[9,6]);
+
+  // ── Slope angle arcs ─────────────────────────────────────────────────
+  // Ph1 green K_mc1: anchor at y-axis (t=0) once line has started
+  if(phase>=1&&drawT>=0.25){
+    drawAngleArc(tx(0),my(greenFn(0)),KMC1,C.green,1);
+  }
+
+  // Ph1 red K_mc1: appears at ~4.7s into phase 1 (drawT≥0.94), anchored at t=0.90
+  // where red has converged and shows same slope as green — visible only in ph1
+  if(phase===1&&drawT>=0.94){
+    drawAngleArc(tx(0.9),my(redFn(0.9)),KMC1,C.red,1);
+  }
+
+  // Ph2 red K_mc1: anchored at t=1.5 (mid-phase, well separated from green at t=0)
+  if(phase===2&&drawT>=1.5){
+    drawAngleArc(tx(1.5),my(redFn(1.5)),KMC1,C.red,1);
+  }
+
+  // Ph3: green adopts K_mc2 (anchor at t=2.1, just after inflection)
+  //      red still K_mc1 (anchor t=1.5, left segment where red held K_mc1)
+  if(phase===3&&drawT>=2.15){
+    drawAngleArc(tx(2.1),my(greenFn(2.1)),KMC2,C.green,2);
+  }
+  if(phase===3&&drawT>=0.3){
+    drawAngleArc(tx(0),my(greenFn(0))+0,KMC1,C.green,1);  // keep green K_mc1 for contrast
+    drawAngleArc(tx(1.5),my(redFn(1.5)),KMC1,C.red,1);
+  }
+
+  // Ph4: both K_mc2 — green at t=2.1, red at t=2.5 (start of red K_mc2 segment)
+  if(phase>=4&&drawT>=2.15){
+    drawAngleArc(tx(2.1),my(greenFn(2.1)),KMC2,C.green,2);
+  }
+  if(phase>=4&&drawT>=2.65){
+    drawAngleArc(tx(2.5),my(redFn(2.5)),KMC2,C.red,2);
+  }
+
+  // Live dots
+  if(drawT>0&&drawT<TMAX){
+    [[greenFn,C.green],[redFn,C.red]].forEach(function(p){
+      ctx.beginPath();ctx.arc(tx(drawT),my(p[0](drawT)),5,0,2*Math.PI);
+      ctx.fillStyle=p[1];ctx.fill();
+      ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();
+    });
+  }
+
+  drawPanel(phase);
+}
+
+// ── Phase config & animation ─────────────────────────────────────────────
+const PHASES=[
+  {start:0,end:1,label:'Phase 1 — Initial Alignment'},
+  {start:1,end:2,label:'Phase 2 — Stable Tracking'},
+  {start:2,end:2.5,label:'Phase 3 — Seasonal Change'},
+  {start:2.5,end:4,label:'Phase 4 — Re-calibration'},
+];
+let curT=0,playing=false,raf=null,startTime=null;
+function getSpeed(p){return(PHASES[p-1].end-PHASES[p-1].start)/5;}
+function playPhase(p){
+  cancelAnimationFrame(raf);curPhase=p;curT=PHASES[p-1].start;
+  playing=true;startTime=null;
+  document.getElementById('sceneLabel').textContent=PHASES[p-1].label;
+  updateBtns();step();
+}
+function step(ts){
+  if(!startTime)startTime=ts;
+  curT=PHASES[curPhase-1].start+(ts-startTime)/1000*getSpeed(curPhase);
+  const end=PHASES[curPhase-1].end;
+  if(curT>=end){curT=end;playing=false;updateBtns();}
+  drawFrame(curT,curPhase);
+  if(playing)raf=requestAnimationFrame(step);
+}
+function updateBtns(){
+  ['bp1','bp2','bp3','bp4'].forEach(function(id,i){
+    document.getElementById(id).style.opacity=(curPhase===i+1&&playing)?'1':'.7';
+  });
+}
+document.getElementById('bp1').onclick=function(){playPhase(1);};
+document.getElementById('bp2').onclick=function(){playPhase(2);};
+document.getElementById('bp3').onclick=function(){playPhase(3);};
+document.getElementById('bp4').onclick=function(){playPhase(4);};
+document.getElementById('brst').onclick=function(){
+  cancelAnimationFrame(raf);playing=false;curPhase=0;curT=0;
+  document.getElementById('sceneLabel').textContent='Press Phase 1 to begin';
+  updateBtns();drawFrame(0,0);
+};
+drawFrame(0,0);
+</script>
+</body>
+</html>
