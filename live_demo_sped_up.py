@@ -117,7 +117,7 @@ if __name__ == "__main__":
 
     clock_base = datetime.datetime.now().replace(minute=0, second=0, microsecond=0)
 
-    # figure-level texts: survive ax.clear(), created once, updated per frame
+
     clock_text = fig.text(
         0.7, 0.95, 'Day 1  00:00',
         ha='center', va='center', fontsize=13, color='white',
@@ -159,7 +159,7 @@ if __name__ == "__main__":
             try:
                 state = state_q.get(timeout=0.05)
             except queue.Empty:
-                plt.pause(0.05)  # nothing new — keep GUI responsive
+                plt.pause(0.05)
                 continue
             if state is None:
                 break
